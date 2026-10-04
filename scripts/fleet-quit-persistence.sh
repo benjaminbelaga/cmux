@@ -130,7 +130,8 @@ for i in $(seq 1 60); do acp session tail qp-agent 2>/dev/null | grep -q tool_pr
 SESSION="$(acp ls --json | jq_py '[s["sessionId"] for s in d["sessions"] if s["name"]=="qp-agent"][0]')"
 agent_running() { acp ls 2>/dev/null | grep qp-agent | grep -q running; }
 check agent-in-turn "$(cond agent_running)" "session $SESSION"
-rpc_ok action.run '{"id":"palette.newAgentChat"}' >/dev/null; sleep 5
+# The agent tab is a store tab; a socket run changes this client's selection only with focus.
+rpc_ok action.run '{"id":"palette.newAgentChat","focus":true}' >"$out/new-chat.json"; sleep 5
 rpc_ok debug.agent_pane "{\"action\":\"select_session\",\"session\":\"$SESSION\"}" >"$out/agent-select.json"
 
 # 4. Before ---------------------------------------------------------------------
