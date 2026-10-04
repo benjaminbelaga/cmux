@@ -4282,7 +4282,7 @@ impl Mux {
                         None,
                         TerminalEffectOptions {
                             argv,
-                            cwd: None,
+                            cwd,
                             name: None,
                             created_screen_name: name,
                             size: effect_cell_size(fields)?,
@@ -4745,7 +4745,9 @@ impl Mux {
             on_exit,
         )?;
         let terminal_hex = reservation.terminal_id.to_hex();
-        let result = self.create_terminal_in_workspace_with_mutation(
+        // The reservation's env is the creation's own (`env` field), so a
+        // create into a fresh workspace gets it like one into a pane.
+        let result = self.create_terminal_in_workspace_with_mutation_env(
             workspace,
             argv,
             cwd,
@@ -4756,6 +4758,7 @@ impl Mux {
             None,
             &reservation.mutation,
             on_exit,
+            reservation.env.clone(),
         )?;
         let surface =
             result.created_surface.context("created terminal result omitted its local surface")?;
@@ -5246,7 +5249,9 @@ fn validate_effect_fields(
         ResourceOperation::WorkspaceLayoutApply => {
             anyhow::ensure!(fields["layout"].is_object(), "layout must be an object");
         }
-        ResourceOperation::PaneCreate | ResourceOperation::TabCreateTerminal => {
+        ResourceOperation::PaneCreate
+        | ResourceOperation::TabCreateTerminal
+        | ResourceOperation::ScreenCreate => {
             let _ = effect_cell_size(fields)?;
             let _ = optional_effect_command(fields)?;
         }
