@@ -1,5 +1,5 @@
 // This file is generated. Do not edit by hand.
-// cmux-tui mux protocol 12, IR 50a6bbc9a1c5cadc9288762748925f479b409472c7976b9cd017e1b0f4dabcdc.
+// cmux-tui mux protocol 12, IR b7b2cb9f25cbe48e949ec085532a95e74e8594dd56a01e46444a0b9ecea5696c.
 // The emitter owns this layout so generation is independent of the installed rustfmt.
 
 use crate::{Nullable, Optional};
@@ -48,6 +48,9 @@ pub struct AgentSessionSource {
     pub harness: Optional<String>,
     /// install: and the stable install id of the machine whose acpmux runs the session.
     pub host: String,
+    /// Display name of the host machine: 1 to 255 bytes, no control characters.
+    #[serde(default, skip_serializing_if = "Optional::is_missing")]
+    pub host_name: Optional<String>,
     /// The acpmux session id; null for a new chat until bind-conversation-tab-session.
     #[serde(default, skip_serializing_if = "Optional::is_missing")]
     pub session: Optional<String>,

@@ -1,5 +1,5 @@
 /* This file is generated. Do not edit by hand. */
-/* cmux-tui mux protocol 12, IR 50a6bbc9a1c5cadc9288762748925f479b409472c7976b9cd017e1b0f4dabcdc. */
+/* cmux-tui mux protocol 12, IR b7b2cb9f25cbe48e949ec085532a95e74e8594dd56a01e46444a0b9ecea5696c. */
 
 
 import type * as T from "./types.js";
@@ -76,6 +76,8 @@ export type AttachSurfaceResult = T.EmptyResult;
 /** Protocol v12; authority: control. */
 export interface BindConversationTabSessionRequest extends CmuxRequestBase {
   cmd: "bind-conversation-tab-session";
+  /** The tab's current session, or null for a tab without one; the bind applies only when it matches. */
+  "expected_session": (string) | null;
   "session": string;
   "surface": T.Id;
 }

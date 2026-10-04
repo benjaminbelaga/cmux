@@ -7,7 +7,7 @@ const client_runtime = @import("../client.zig");
 
 pub const schema_version: u16 = 2;
 pub const mux_protocol: u16 = 12;
-pub const ir_sha256 = "50a6bbc9a1c5cadc9288762748925f479b409472c7976b9cd017e1b0f4dabcdc";
+pub const ir_sha256 = "b7b2cb9f25cbe48e949ec085532a95e74e8594dd56a01e46444a0b9ecea5696c";
 
 pub const AgentRecord = struct {
     session: wire.Nullable([]const u8),
@@ -40,6 +40,8 @@ pub const AgentSessionSource = struct {
     harness: wire.Field([]const u8) = .absent,
     /// install: and the stable install id of the machine whose acpmux runs the session.
     host: []const u8,
+    /// Display name of the host machine: 1 to 255 bytes, no control characters.
+    host_name: wire.Field([]const u8) = .absent,
     /// The acpmux session id; null for a new chat until bind-conversation-tab-session.
     session: wire.Field([]const u8) = .absent,
 };
@@ -2585,6 +2587,8 @@ pub fn attachSurface(client: anytype, request: AttachSurfaceRequest) !client_run
 }
 
 pub const BindConversationTabSessionRequest = struct {
+    /// The tab's current session, or null for a tab without one; the bind applies only when it matches.
+    expected_session: wire.Nullable([]const u8),
     session: []const u8,
     surface: Id,
 };

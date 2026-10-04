@@ -1,5 +1,5 @@
 // This file is generated. Do not edit by hand.
-// cmux-tui mux protocol 12, IR 50a6bbc9a1c5cadc9288762748925f479b409472c7976b9cd017e1b0f4dabcdc.
+// cmux-tui mux protocol 12, IR b7b2cb9f25cbe48e949ec085532a95e74e8594dd56a01e46444a0b9ecea5696c.
 // The emitter owns this layout so generation is independent of the installed rustfmt.
 
 use super::metadata::*;
@@ -94,6 +94,8 @@ pub type AttachSurfaceResult = T::EmptyResult;
 #[rustfmt::skip]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct BindConversationTabSessionRequest {
+    /// The tab's current session, or null for a tab without one; the bind applies only when it matches.
+    pub expected_session: Nullable<String>,
     pub session: String,
     pub surface: T::Id,
 }
