@@ -12,11 +12,11 @@ private actor RecordingHost: AgentPaneHostProviding {
     private(set) var reconnects = 0
     func handshake(sessionId: String?) async throws -> AgentPaneHandshake {
         asked.append(sessionId)
-        return AgentPaneHandshake.acpmux(AcpmuxWebEndpoint(url: URL(fileURLWithPath: "/"), token: "t"), sessionId: sessionId)
+        return AgentPaneHandshake.acpmux(AcpmuxConnection(url: URL(fileURLWithPath: "/"), dashboardToken: "t", localAppToken: nil), sessionId: sessionId)
     }
     func reconnectHandshake(sessionId: String?) async throws -> AgentPaneHandshake {
         reconnects += 1
-        return AgentPaneHandshake.acpmux(AcpmuxWebEndpoint(url: URL(fileURLWithPath: "/"), token: "t"), sessionId: sessionId)
+        return AgentPaneHandshake.acpmux(AcpmuxConnection(url: URL(fileURLWithPath: "/"), dashboardToken: "t", localAppToken: nil), sessionId: sessionId)
     }
 }
 

@@ -36,10 +36,11 @@ import Testing
         #expect(!PageDescriptor.agent.owns(URL(string: "cmux-agent://pane/")))
     }
 
-    /// The page reaches acpmux on loopback and shows loopback previews; nothing else on the network.
-    @Test func theAgentPageCSPAllowsOnlyLoopback() {
+    /// The page opens no connection (acpmux is reached through the host's socket) and shows
+    /// loopback previews; nothing else on the network.
+    @Test func theAgentPageCSPAllowsOnlyLoopbackFrames() {
         let header = PageDescriptor.agent.csp.header
-        #expect(header.contains("connect-src ws://127.0.0.1:* ws://localhost:*"))
+        #expect(!header.contains("connect-src"))
         #expect(header.contains("frame-src http://localhost:* http://127.0.0.1:* https://localhost:* https://127.0.0.1:*"))
         #expect(header.hasPrefix("default-src 'none'"))
     }

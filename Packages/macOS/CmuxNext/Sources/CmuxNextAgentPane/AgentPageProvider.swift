@@ -6,11 +6,11 @@ public extension PageDescriptor {
     /// The agent pane, and with it the new tab page (react-pages.md, agent pane move). It reaches
     /// only its own `cmux.agent.*` ops; the app actions it may run are checked by
     /// ``AgentPaneModel`` (`cmux.agent.action.run`), so it lists no shared native op.
-    /// It connects to acpmux on loopback and shows loopback previews in frames (the page's own CSP
-    /// says the same).
+    /// It reaches acpmux only through the host's socket (`cmux.agent.transport.*`, AgentPaneTransport),
+    /// so it may open no WebSocket; it shows loopback previews in frames (the page's own CSP says the same).
     static let agent = PageDescriptor(
         id: "cmux.agent", resource: "agent-pane", namespaces: [AgentPageOps.namespace],
-        csp: PageCSP(connect: ["ws://127.0.0.1:*", "ws://localhost:*"],
+        csp: PageCSP(connect: [],
                      frame: ["http://localhost:*", "http://127.0.0.1:*", "https://localhost:*", "https://127.0.0.1:*"]))
 }
 
@@ -29,6 +29,7 @@ public nonisolated struct AgentPageOps {
             "quick.dismiss", "quick.openInWindow",
             "git.diff", "git.status", "file.search", "git.checkpoint.diff",
             "dictation.toggle", "dictation.start", "dictation.stop", "dictation.cancel", "dictation.openSettings",
+            "transport.open", "transport.send", "transport.close",
         ].map { ($0, $0) })
         methods["handshake"] = "ready"
         methods["session.persist"] = "chat.persistSession"

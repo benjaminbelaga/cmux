@@ -278,6 +278,20 @@ final class AgentTabStore {
         model.onCheckpointAvailability = { [weak self] _ in self?.publishCheckpointAvailability() }
         // A local session's folder is read by the local session host; the page refuses cloud sessions.
         if let git { model.onGit = { request in try await git.read(request) } }
+        model.workspaceRoots = { [weak self] in self?.workspaceRoots(of: key) ?? [] }
+    }
+
+    /// The local folders of the workspace that lists agent tab `key`: every local tab's cwd. The
+    /// pane's relay limits each `cwd` and `path` the page sends to these (AcpmuxPathPolicy).
+    func workspaceRoots(of key: String) -> [String] {
+        guard let paneKey = paneKey(listing: key), let store = paneStores[paneKey],
+              let workspace = store.workspaces.first(where: { $0.screens.contains { $0.panes.contains { $0.id == paneKey } } })
+        else { return [] }
+        var roots: [String] = []
+        for tab in workspace.screens.flatMap(\.panes).flatMap(\.tabs) where tab.kind != .remoteTerminal {
+            if let cwd = tab.cwd, !roots.contains(cwd) { roots.append(cwd) }
+        }
+        return roots
     }
 
     /// A pane view on this store's page and host, with the shared pushes.
