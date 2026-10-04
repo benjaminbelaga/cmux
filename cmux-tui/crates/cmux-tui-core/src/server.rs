@@ -110,12 +110,12 @@ mod conversations;
 mod frontend_browser_history;
 mod home;
 mod launch_snapshot;
+mod new_screen;
 mod personal;
 mod raw_tab;
 #[cfg(unix)]
 mod remote_entry;
 mod responses;
-mod new_screen;
 mod rows;
 mod screen_json;
 mod session_stream;
