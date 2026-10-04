@@ -22,11 +22,11 @@ private actor StandInHost: AgentPaneHostProviding {
 /// frames and neither token.
 @MainActor
 @Suite(.serialized) struct AgentPaneTokenIsolationTests {
-    static let dashboard = "dash" + String(repeating: "d4", count: 20)
-    static let localApp = String(repeating: "e5", count: 32)
+    nonisolated static let dashboard = "dash" + String(repeating: "d4", count: 20)
+    nonisolated static let localApp = String(repeating: "e5", count: 32)
 
     /// Records into `window.__spySeen` everything that crosses the page world.
-    static let spy = #"""
+    nonisolated static let spy = #"""
     (() => {
       const seen = (window.__spySeen = []);
       const stringify = JSON.stringify;

@@ -22,8 +22,8 @@ private actor FileTokenHost: AgentPaneHostProviding {
 
 @MainActor
 @Suite(.serialized) struct AgentPaneTransportTests {
-    static let localApp = String(repeating: "a1", count: 32)
-    static let initialize = #"{"jsonrpc":"2.0","id":0,"method":"initialize","params":{"protocolVersion":1}}"#
+    nonisolated static let localApp = String(repeating: "a1", count: 32)
+    nonisolated static let initialize = #"{"jsonrpc":"2.0","id":0,"method":"initialize","params":{"protocolVersion":1}}"#
 
     private func connection(_ server: AcpmuxStandInServer, localApp: String? = localApp) -> AcpmuxConnection {
         AcpmuxConnection(url: server.url, dashboardToken: "dash-token", localAppToken: localApp)
