@@ -544,9 +544,8 @@ impl Mux {
         if !kept.is_empty() {
             self.tab_launches.kept_input.lock().unwrap().insert(terminal_hex.to_string(), kept);
         }
-        if let Err(error) =
-            self.persist_terminal_exit(terminal_hex, None, &TerminalEnd::launch_failed(cause))
-        {
+        let end = TerminalEnd::launch_failed(cause);
+        if let Err(error) = self.persist_terminal_exit_with(terminal_hex, None, &end, true) {
             eprintln!("cmux-tui: terminal {terminal_hex} launch failure not committed: {error:#}");
         }
         self.emit(MuxEvent::TreeChanged);
