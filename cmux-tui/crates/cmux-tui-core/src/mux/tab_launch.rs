@@ -114,7 +114,7 @@ impl PendingLaunch {
     }
 
     /// Cancel the launch; a host already launched ends now.
-    fn cancel(&self) {
+    pub(super) fn cancel(&self) {
         let previous = std::mem::replace(&mut *self.host.lock().unwrap(), HostSlot::Cancelled);
         self.done.notify_all();
         drop(previous);
@@ -135,7 +135,7 @@ pub(crate) struct TabLaunches {
     /// the tab cancels the launch at once.
     accepted: Mutex<HashMap<SurfaceId, AcceptedLaunch>>,
     /// Queued input of failed launches, by terminal host id (R5).
-    kept_input: Mutex<HashMap<String, Vec<u8>>>,
+    pub(super) kept_input: Mutex<HashMap<String, Vec<u8>>>,
 }
 
 impl Mux {
@@ -178,37 +178,56 @@ impl Mux {
             None => TerminalId::random()?,
         };
         let terminal_hex = terminal_id.to_hex();
+        let mut pending = self.tab_launches.pending.lock().unwrap();
+        anyhow::ensure!(
+            !pending.contains_key(&terminal_hex),
+            "terminal {terminal_hex} is already launching"
+        );
+        let launch = self.start_pending_launch(
+            terminal_id,
+            self.next_id(),
+            TabResourceIdentity::terminal(None)?,
+            launch_opts,
+            cell_pixels,
+        )?;
+        pending.insert(terminal_hex.clone(), launch);
+        Ok(Some(terminal_hex))
+    }
+
+    /// Start the host launch of a terminal whose surface will carry
+    /// `surface_id` and `resource_identity`, on the terminal work pool.
+    pub(super) fn start_pending_launch(
+        self: &Arc<Self>,
+        terminal_id: TerminalId,
+        surface_id: SurfaceId,
+        resource_identity: TabResourceIdentity,
+        launch_opts: SurfaceOptions,
+        cell_pixels: (u16, u16),
+    ) -> anyhow::Result<Arc<PendingLaunch>> {
         let launch = Arc::new(PendingLaunch {
             terminal_id,
-            surface_id: self.next_id(),
-            resource_identity: TabResourceIdentity::terminal(None)?,
+            surface_id,
+            resource_identity,
             launch_opts,
             host: Mutex::new(HostSlot::Launching),
             done: Condvar::new(),
         });
-        {
-            let mut pending = self.tab_launches.pending.lock().unwrap();
-            anyhow::ensure!(
-                !pending.contains_key(&terminal_hex),
-                "terminal {terminal_hex} is already launching"
-            );
-            pending.insert(terminal_hex.clone(), launch.clone());
-        }
         let mux = self.clone();
+        let job_launch = launch.clone();
         let job: Box<dyn FnOnce() + Send> = Box::new(move || {
             test_hooks::pause(test_hooks::LAUNCH_JOB_DELAY);
-            if launch.is_cancelled() {
+            if job_launch.is_cancelled() {
                 return;
             }
-            let host = mux.launch_pending_host(&launch, cell_pixels);
-            launch.finish(host);
+            let host = mux.launch_pending_host(&job_launch, cell_pixels);
+            job_launch.finish(host);
         });
         if let Err(job) = self.submit_terminal_work(job) {
             // The pool is saturated; the accept must not wait for this
             // launch on the request thread, so give it its own thread.
             std::thread::Builder::new().name("mux-tab-launch".into()).spawn(job)?;
         }
-        Ok(Some(terminal_hex))
+        Ok(launch)
     }
 
     /// Launch the host of `launch`, on the pool's spare host when one is
@@ -348,6 +367,18 @@ impl Mux {
                 return Err(error);
             }
         };
+        self.start_launch_job(launch, &placeholder, control, workspace_key)?;
+        Ok(placeholder)
+    }
+
+    /// Run the launch job of `placeholder` on the terminal work pool.
+    pub(super) fn start_launch_job(
+        self: &Arc<Self>,
+        launch: &Arc<PendingLaunch>,
+        placeholder: &Arc<Surface>,
+        control: Arc<LaunchControl>,
+        workspace_key: &str,
+    ) -> anyhow::Result<()> {
         self.tab_launches.accepted.lock().unwrap().insert(
             placeholder.id,
             AcceptedLaunch { control: control.clone(), launch: launch.clone() },
@@ -369,7 +400,7 @@ impl Mux {
             // Never inline: the job waits for this creation to commit.
             std::thread::Builder::new().name("mux-launch-job".into()).spawn(job)?;
         }
-        Ok(placeholder)
+        Ok(())
     }
 
     /// The launch job of one accepted terminal (3.2).
@@ -727,7 +758,7 @@ enum LaunchJobEnd {
 /// Put the adopted `hosted` surface where `placeholder` was, keeping the
 /// surface id, tab identity and terminal catalog entry. False when the
 /// placeholder left the state (its tab closed).
-fn replace_launching_surface(
+pub(super) fn replace_launching_surface(
     state: &mut State,
     placeholder: &Arc<Surface>,
     hosted: &Arc<Surface>,

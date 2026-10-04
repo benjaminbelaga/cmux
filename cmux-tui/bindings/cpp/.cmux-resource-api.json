@@ -1,5 +1,5 @@
 {
-  "catalog_sha256": "ab84e9047d3da19143893b303ad35a997a1f77b27bfcd65810d453f3b16bd93a",
+  "catalog_sha256": "580e19850412ebf3d41574789d8150d80091bc17abe4b7fd26b14d473a969f60",
   "operations": {
     "agent.list": {
       "class": "read"
@@ -448,6 +448,9 @@
     "terminal.input.mouse": {
       "class": "mutation"
     },
+    "terminal.input.send_kept": {
+      "class": "mutation"
+    },
     "terminal.input.write": {
       "class": "mutation"
     },
@@ -464,6 +467,9 @@
       "class": "read"
     },
     "terminal.project": {
+      "class": "mutation"
+    },
+    "terminal.relaunch": {
       "class": "mutation"
     },
     "terminal.renderer_grant.create": {

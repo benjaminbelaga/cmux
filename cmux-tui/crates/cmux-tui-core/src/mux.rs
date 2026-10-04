@@ -35,6 +35,10 @@ pub(crate) use tab_strip::StripRequest;
 mod pending_terminals;
 #[cfg(unix)]
 mod tab_launch;
+#[cfg(unix)]
+mod terminal_relaunch;
+#[cfg(unix)]
+pub(crate) use terminal_relaunch::TerminalRelaunch;
 mod terminal_directory;
 mod terminal_exit;
 mod terminal_move_topology;

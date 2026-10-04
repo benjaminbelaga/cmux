@@ -195,8 +195,12 @@ fn a_launch_that_fails_after_accept_keeps_the_tab_and_its_input() {
         }),
         Some("accept-relaunch"),
     );
-    assert_ne!(relaunched["value"]["terminal_incarnation"], exited["terminal_incarnation"]);
-    wait_for_terminal_lifecycle(&harness.socket, &terminal, "running");
+    assert_eq!(relaunched["value"]["terminal"], public.as_str(), "{relaunched}");
+    // The v2 API keeps the host incarnation private; the legacy resolver
+    // shows the relaunch runs a new one.
+    let running = wait_for_terminal_lifecycle(&harness.socket, &terminal, "running");
+    assert!(running["terminal_incarnation"].is_string(), "{running}");
+    assert_ne!(running["terminal_incarnation"], exited["terminal_incarnation"]);
     std::thread::sleep(Duration::from_millis(300));
     let clean = request(
         &harness.socket,

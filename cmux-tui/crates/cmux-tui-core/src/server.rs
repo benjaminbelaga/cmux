@@ -125,7 +125,7 @@ mod rows;
 mod screen_json;
 mod session_stream;
 mod split_kind;
-mod split_respawn;
+pub(crate) mod split_respawn;
 mod tab_column;
 mod websocket_listener;
 #[cfg(unix)]

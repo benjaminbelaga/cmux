@@ -4151,11 +4151,19 @@ impl Surface {
                 std::io::ErrorKind::NotConnected,
                 "terminal has no live PTY owner for receipted input",
             ))),
+            // A launching terminal queues the write whole (R4); the receipt
+            // confirms the queue, which is not durable.
             #[cfg(unix)]
-            PtyRuntime::Launching(_) => Err(ConfirmedInputFailure::Known(std::io::Error::new(
-                std::io::ErrorKind::NotConnected,
-                "terminal-launching: receipted input waits for the terminal to run",
-            ))),
+            PtyRuntime::Launching(control) => {
+                control.enqueue(bytes, false).map(drop).map_err(|error| match error {
+                    launching::LaunchEnqueueError::Budget(budget) => {
+                        ConfirmedInputFailure::Known(std::io::Error::other(budget))
+                    }
+                    launching::LaunchEnqueueError::Io(error) => {
+                        ConfirmedInputFailure::Indeterminate(error)
+                    }
+                })
+            }
         }
     }
 
