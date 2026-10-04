@@ -1,5 +1,5 @@
 /* This file is generated. Do not edit by hand. */
-/* cmux-tui mux protocol 12, IR 3d68350e643abae41960f97711e728cf3681b9fc60044ae1fc478ec89addd2a4. */
+/* cmux-tui mux protocol 12, IR 888da553de9381a0984789ba51f58b7ab66e43ca6bc5b649c233ae6753fb7a5d. */
 
 
 import type * as T from "./types.js";
@@ -1127,12 +1127,15 @@ export interface NewScreenRequest extends CmuxRequestBase {
   "color"?: (string) | null;
   "cols"?: (number) | null;
   "cwd"?: (string) | null;
+  "env"?: (Record<string, string>) | null;
   "group"?: (string) | null;
   "icon"?: (string) | null;
   "index"?: (bigint) | null;
   "pinned"?: (boolean) | null;
   "rows"?: (number) | null;
   "screen_name"?: (string) | null;
+  "shell_args"?: (Array<string>) | null;
+  "terminal_id"?: (string) | null;
   "workspace"?: (T.Id) | null;
 }
 export type NewScreenResult = T.SurfaceResult;

@@ -44,7 +44,7 @@ impl Command {
                 | Self::NewPane { .. }
                 | Self::NewPaneRight { .. }
                 | Self::Split { .. }
-                | Self::NewScreen { .. }
+                | Self::NewScreen(_)
                 | Self::NewWorkspace { .. }
                 | Self::CreateTerminal { .. }
         )
