@@ -21,6 +21,17 @@ nonisolated final class AcpmuxStandInServer: Sendable {
         var port: UInt16 = 0
         /// When false, requests get no reply (overflow tests push only).
         var answers = true
+        /// The stream in flight (``stream(to:count:interval:)``).
+        var stream: Stream?
+    }
+
+    /// A timed stream: frame `i` is sent at `sent[i]` and acknowledged (`{"a":i}`) at `acked[i]`.
+    struct Stream {
+        var index: Int
+        var sent: [UInt64]
+        var acked: [UInt64]
+        var remaining: Int
+        var done: CheckedContinuation<Void, Never>?
     }
 
     private let queue = DispatchQueue(label: "acpmux.standin", qos: .userInitiated)
@@ -103,6 +114,22 @@ nonisolated final class AcpmuxStandInServer: Sendable {
     }
 
     private func handle(_ text: String, index: Int) {
+        if text.hasPrefix(Self.ackPrefix) {
+            let now = DispatchTime.now().uptimeNanoseconds
+            let digits = text.dropFirst(Self.ackPrefix.count).prefix { $0.isNumber }
+            let done = state.withLock { state -> CheckedContinuation<Void, Never>? in
+                guard var stream = state.stream, stream.index == index,
+                      let seq = Int(digits), stream.acked.indices.contains(seq), stream.acked[seq] == 0 else { return nil }
+                stream.acked[seq] = now
+                stream.remaining -= 1
+                let done = stream.remaining == 0 ? stream.done : nil
+                if done != nil { stream.done = nil }
+                state.stream = stream
+                return done
+            }
+            done?.resume()
+            return
+        }
         let answers = state.withLock { state -> Bool in
             state.peers[index].frames.append(text)
             return state.answers
@@ -123,6 +150,45 @@ nonisolated final class AcpmuxStandInServer: Sendable {
         let metadata = NWProtocolWebSocket.Metadata(opcode: .text)
         let context = NWConnection.ContentContext(identifier: "frame", metadata: [metadata])
         connection.send(content: Data(text.utf8), contentContext: context, isComplete: true, completion: .idempotent)
+    }
+
+    /// A bench acknowledgement: an allowlisted notification, so it passes the relay as any page
+    /// frame does: `{"jsonrpc":"2.0","method":"session/cancel","params":{"sessionId":"a<seq>"}}`.
+    static let ackPrefix = #"{"jsonrpc":"2.0","method":"session/cancel","params":{"sessionId":"a"#
+
+    /// The bench's `session/update` frame (about 300 bytes) with sequence `seq`.
+    static func benchFrame(_ seq: Int) -> String {
+        #"{"jsonrpc":"2.0","method":"session/update","params":{"s":"# + String(seq)
+            + #","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":""#
+            + String(repeating: "x", count: 200) + #""}}}}"#
+    }
+
+    /// Sends `count` bench frames to connection `index`, back to back (`interval` 0) or one every
+    /// `interval` nanoseconds, and returns each frame's send-to-acknowledgement time (ns) and the
+    /// time from the first send to the last acknowledgement.
+    func stream(to index: Int, count: Int, interval: UInt64 = 0) async -> (latencies: [UInt64], total: UInt64) {
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            state.withLock { $0.stream = Stream(index: index, sent: Array(repeating: 0, count: count),
+                                                acked: Array(repeating: 0, count: count), remaining: count, done: continuation) }
+            queue.async {
+                let start = DispatchTime.now().uptimeNanoseconds
+                for seq in 0..<count {
+                    let send = { [weak self] in
+                        guard let self else { return }
+                        self.state.withLock { $0.stream?.sent[seq] = DispatchTime.now().uptimeNanoseconds }
+                        self.push(Self.benchFrame(seq), to: index)
+                    }
+                    if interval == 0 { send() } else {
+                        self.queue.asyncAfter(deadline: DispatchTime(uptimeNanoseconds: start + UInt64(seq) * interval), execute: send)
+                    }
+                }
+            }
+        }
+        return state.withLock { state in
+            guard let stream = state.stream else { return ([], 0) }
+            state.stream = nil
+            return (zip(stream.sent, stream.acked).map { $1 &- $0 }, (stream.acked.max() ?? 0) &- (stream.sent.min() ?? 0))
+        }
     }
 
     /// Waits (polling the recorded state; test helper) until `condition` holds or `seconds` pass.

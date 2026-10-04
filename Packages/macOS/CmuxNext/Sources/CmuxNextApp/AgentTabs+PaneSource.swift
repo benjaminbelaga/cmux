@@ -30,7 +30,7 @@ extension AgentTabStore {
 
     /// The daemon the app starts, in every build configuration and for every page source: no
     /// `--allow-dev-origin` and no `--dev` (the host's socket carries the bundled pane's origin).
-    static func paneEnvironment(tag: String?, bundledBinDirectory: URL?, environment: [String: String]) -> AcpmuxEnvironment? {
+    nonisolated static func paneEnvironment(tag: String?, bundledBinDirectory: URL?, environment: [String: String]) -> AcpmuxEnvironment? {
         AcpmuxEnvironment.resolve(tag: tag, bundledBinDirectory: bundledBinDirectory, environment: environment)
     }
 }
