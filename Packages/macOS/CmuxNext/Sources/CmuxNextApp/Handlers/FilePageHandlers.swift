@@ -14,8 +14,8 @@ enum FilePageHandlers {
 
     static func bind(into registry: ActionRegistry, context: AppActionContext) {
         let services = context.services
-        services.pages.register(services.markdownPages)
-        services.pages.register(services.editorPages)
+        services.pages.register(services.viewers.markdownPages)
+        services.pages.register(services.viewers.editorPages)
         for (action, command) in MarkdownPageCommand.forAction {
             registry.bind(ActionID(rawValue: action), run: { invocation in
                 try page(.markdown, context, invocation).send(command: command)
@@ -36,7 +36,7 @@ enum FilePageHandlers {
         // The word wrap toggle is the `editor.wordWrap` setting (PAGE-PREFS); the page follows its look.
         registry.bind("toggleFileEditorWordWrap", run: { invocation in
             _ = try page(.editor, context, invocation)
-            let look = services.editorPages.look
+            let look = services.viewers.editorPages.look
             let current = look.current()["settings"]?["wordWrap"]?.stringValue ?? "off"
             let writer = SettingWriter(invocation.origin)
             registry.track(Task { @MainActor in
@@ -56,7 +56,7 @@ enum FilePageHandlers {
     }
 
     static func service(_ kind: FilePageKind, _ services: AppServices) -> FilePageService {
-        kind == .markdown ? services.markdownPages : services.editorPages
+        kind == .markdown ? services.viewers.markdownPages : services.viewers.editorPages
     }
 
     /// The file a file page tab shows (Reveal in Finder, Open With), nil for any other tab.
@@ -69,7 +69,7 @@ enum FilePageHandlers {
     /// Sends a shared find action to an editor page tab; false for any other page.
     static func sendFind(_ action: String, _ key: String, _ services: AppServices, text: String? = nil) -> Bool {
         guard LocalPageTab.page(of: key) == .editor, let command = EditorPageCommand.forAction[action],
-              let page = services.editorPages.pageView(key) else { return false }
+              let page = services.viewers.editorPages.pageView(key) else { return false }
         return page.send(command: command, arguments: text.map { ["text": .string($0)] } ?? [:])
     }
 }
