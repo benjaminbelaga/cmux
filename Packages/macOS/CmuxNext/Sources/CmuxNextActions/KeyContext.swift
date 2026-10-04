@@ -98,5 +98,8 @@ extension ActionContext {
     ]
 
     /// The bits a window's focus decides; the rest are app-wide facts.
-    public nonisolated static let focusBits: ActionContext = [.terminalFocused, .browserFocused, .agentPaneFocused, .omnibarFocused, .diffViewerFocused]
+    public nonisolated static let focusBits: ActionContext = [
+        .terminalFocused, .browserFocused, .agentPaneFocused, .omnibarFocused, .diffViewerFocused, .markdownFocused,
+        .filePreviewFocused,
+    ]
 }
