@@ -170,7 +170,7 @@ fn a_launch_that_fails_after_accept_keeps_the_tab_and_its_input() {
         &harness.socket,
         serde_json::json!({
             "id": 3, "cmd": "new-tab", "pane": pane, "terminal_id": terminal,
-            "env": {"SHELL": missing},
+            "env": {"SHELL": missing}, "shell_args": ["-l"],
         }),
     );
     assert_eq!(reply["lifecycle"], "launching", "{reply}");

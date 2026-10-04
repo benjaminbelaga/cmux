@@ -121,11 +121,19 @@ impl PendingLaunch {
     }
 }
 
+struct AcceptedLaunch {
+    control: Arc<LaunchControl>,
+    launch: Arc<PendingLaunch>,
+}
+
 /// Launches between their start and their creation's accept, and input
 /// kept from failed launches.
 #[derive(Default)]
 pub(crate) struct TabLaunches {
     pending: Mutex<HashMap<String, Arc<PendingLaunch>>>,
+    /// Accepted launches by their placeholder's surface id, so a close of
+    /// the tab cancels the launch at once.
+    accepted: Mutex<HashMap<SurfaceId, AcceptedLaunch>>,
     /// Queued input of failed launches, by terminal host id (R5).
     kept_input: Mutex<HashMap<String, Vec<u8>>>,
 }
@@ -340,12 +348,22 @@ impl Mux {
                 return Err(error);
             }
         };
+        self.tab_launches.accepted.lock().unwrap().insert(
+            placeholder.id,
+            AcceptedLaunch { control: control.clone(), launch: launch.clone() },
+        );
         let mux = self.clone();
         let job_launch = launch.clone();
         let job_placeholder = placeholder.clone();
         let workspace_key = workspace_key.to_string();
         let job: Box<dyn FnOnce() + Send> = Box::new(move || {
-            mux.run_launch_job(&job_launch, &job_placeholder, &control, &workspace_key);
+            let finished =
+                mux.run_launch_job(&job_launch, &job_placeholder, &control, &workspace_key);
+            mux.tab_launches.accepted.lock().unwrap().remove(&job_placeholder.id);
+            if finished == LaunchJobEnd::Cancelled {
+                // The tab closed during the launch: retire its terminal.
+                mux.retire_cancelled_launch(control.terminal_id());
+            }
         });
         if let Err(job) = self.submit_terminal_work(job) {
             // Never inline: the job waits for this creation to commit.
@@ -361,32 +379,33 @@ impl Mux {
         placeholder: &Arc<Surface>,
         control: &Arc<LaunchControl>,
         workspace_key: &str,
-    ) {
+    ) -> LaunchJobEnd {
         let terminal_hex = control.terminal_id().to_string();
         if !control.wait_accepted(LAUNCH_ACCEPT_TIMEOUT) {
-            // Closed before it ran, or its creation never committed.
-            let never_committed = !control.is_cancelled();
+            if control.is_cancelled() {
+                launch.cancel();
+                return LaunchJobEnd::Cancelled;
+            }
+            // The creation never committed its topology.
             control.cancel();
             launch.cancel();
-            if never_committed {
-                let _ = self.persist_terminal_exit(
-                    &terminal_hex,
-                    None,
-                    &TerminalEnd::launch_failed("creation-not-committed"),
-                );
-            }
-            return;
+            let _ = self.persist_terminal_exit(
+                &terminal_hex,
+                None,
+                &TerminalEnd::launch_failed("creation-not-committed"),
+            );
+            return LaunchJobEnd::Settled;
         }
-        let Some(host) = launch.take_host() else { return };
+        let Some(host) = launch.take_host() else { return LaunchJobEnd::Cancelled };
         if control.is_cancelled() {
-            return;
+            return LaunchJobEnd::Cancelled;
         }
         let hosted =
             match host.and_then(|host| Surface::spawn_prelaunched(host, Arc::downgrade(self))) {
                 Ok(hosted) => hosted,
                 Err(error) => {
                     self.fail_launch(control, &format!("launch-failed: {error:#}"));
-                    return;
+                    return LaunchJobEnd::Settled;
                 }
             };
         let _pending_host_release = PendingTerminalHostRelease(hosted.clone());
@@ -394,18 +413,19 @@ impl Mux {
         let Some(identity) = hosted.terminal_host_identity() else {
             hosted.kill();
             self.fail_launch(control, "launch-failed: host returned no identity");
-            return;
+            return LaunchJobEnd::Settled;
         };
         if identity.terminal_id != terminal_hex {
             hosted.kill();
             self.fail_launch(control, "launch-failed: host-identity-mismatch");
-            return;
+            return LaunchJobEnd::Settled;
         }
-        if let Err(error) = self.commit_launched_terminal(control, &identity) {
+        if let Err(error) = self.commit_launched_terminal(control, placeholder, &identity) {
             // A1: the tab closed during the launch, or the row moved on.
             eprintln!("cmux-tui: terminal {terminal_hex} launch not committed: {error:#}");
             hosted.kill();
-            return;
+            control.cancel();
+            return LaunchJobEnd::Cancelled;
         }
         test_hooks::pause(test_hooks::ACTIVATE_DELAY);
         let cell_pixel_lifecycle = match self.reconcile_surface_cell_pixels_for_publish(&hosted) {
@@ -417,7 +437,7 @@ impl Mux {
                     &error,
                 );
                 hosted.kill();
-                return;
+                return LaunchJobEnd::Settled;
             }
         };
         if let Err(error) = hosted.activate_hosted_launch_stream() {
@@ -431,7 +451,7 @@ impl Mux {
         if !swapped {
             // Closed between the commit and the swap.
             hosted.kill();
-            return;
+            return LaunchJobEnd::Cancelled;
         }
         let _ = hosted.persist_host_workspace(workspace_key);
         let (cols, rows) = placeholder.size();
@@ -450,6 +470,32 @@ impl Mux {
             let _ = self.retry_pending_agent_hooks_for_terminal(public_id);
         }
         self.reap_if_dead(&hosted);
+        LaunchJobEnd::Settled
+    }
+
+    /// The tab of a launching terminal closed (every tab close purges its
+    /// surface's side tables): cancel the launch now, so a host still
+    /// launching never starts and a launched one ends.
+    pub(super) fn cancel_closed_launching_tab(&self, surface: SurfaceId) {
+        let accepted = self.tab_launches.accepted.lock().unwrap().remove(&surface);
+        let Some(accepted) = accepted else { return };
+        if accepted.control.cancel().is_none() {
+            accepted.launch.cancel();
+        }
+    }
+
+    /// End the durable row of a launch whose tab closed before it ran.
+    fn retire_cancelled_launch(&self, terminal_hex: &str) {
+        let retired = self.close_terminal_with_mutation(
+            terminal_hex,
+            None,
+            None,
+            None,
+            &WorkspaceMutation::local("cmux-tui"),
+        );
+        if let Err(error) = retired {
+            eprintln!("cmux-tui: closed launching terminal {terminal_hex} not retired: {error:#}");
+        }
     }
 
     /// Commit `running` for the adopted host, under the registry lock, only
@@ -458,10 +504,18 @@ impl Mux {
     fn commit_launched_terminal(
         &self,
         control: &LaunchControl,
+        placeholder: &Arc<Surface>,
         identity: &TerminalHostIdentity,
     ) -> anyhow::Result<()> {
         let mut registry = self.workspace_registry.lock().unwrap();
-        anyhow::ensure!(!control.is_cancelled(), "the tab closed during its launch");
+        let placed = self
+            .state
+            .lock()
+            .unwrap()
+            .surfaces
+            .get(&placeholder.id)
+            .is_some_and(|current| Arc::ptr_eq(current, placeholder));
+        anyhow::ensure!(placed && !control.is_cancelled(), "the tab closed during its launch");
         let terminal = registry
             .terminal_record(&identity.terminal_id)?
             .context("the launching terminal disappeared")?;
@@ -660,6 +714,15 @@ impl Mux {
     pub(crate) fn take_kept_terminal_input(&self, terminal_hex: &str) -> Option<Vec<u8>> {
         self.tab_launches.kept_input.lock().unwrap().remove(terminal_hex)
     }
+}
+
+/// How a launch job ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LaunchJobEnd {
+    /// The terminal runs, or its failure is committed.
+    Settled,
+    /// The tab closed first; the job ended the host.
+    Cancelled,
 }
 
 /// Put the adopted `hosted` surface where `placeholder` was, keeping the

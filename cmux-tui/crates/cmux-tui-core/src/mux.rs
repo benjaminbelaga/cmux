@@ -11874,6 +11874,8 @@ impl Mux {
     /// leak an entry forever and `list-agents` would keep reporting dead
     /// surfaces as live agents.
     fn purge_surface_side_tables(&self, surface: SurfaceId) {
+        #[cfg(unix)]
+        self.cancel_closed_launching_tab(surface);
         let _lifecycle = self.lock_client_sizing_lifecycle();
         let mut sizing = self.client_sizing.lock().unwrap();
         sizing.surfaces.remove(&surface);
