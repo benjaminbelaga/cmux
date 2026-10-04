@@ -32,7 +32,7 @@ pub(crate) const FRONTEND_BROWSER_TAB_KEYS_CAPABILITY: &str = "frontend-browser-
 
 /// Serializes keyed creations (process-wide; held for the whole creation and
 /// taken before every other lock).
-static KEYED_CREATION: Mutex<()> = Mutex::new(());
+pub(crate) static KEYED_CREATION: Mutex<()> = Mutex::new(());
 
 pub(crate) fn create_frontend_browser_keys_schema(tx: &Transaction<'_>) -> anyhow::Result<()> {
     tx.execute_batch(
@@ -61,7 +61,7 @@ fn browser_for_key(connection: &Connection, key: &str) -> anyhow::Result<Option<
 
 /// Whether a tab ever committed browser content `browser_id` (live or
 /// closed: closed identities keep their row as a tombstone).
-fn browser_committed(connection: &Connection, browser_id: &str) -> anyhow::Result<bool> {
+pub(crate) fn browser_committed(connection: &Connection, browser_id: &str) -> anyhow::Result<bool> {
     Ok(connection
         .query_row("SELECT 1 FROM resource_identities WHERE public_id = ?1", [browser_id], |_| {
             Ok(())
