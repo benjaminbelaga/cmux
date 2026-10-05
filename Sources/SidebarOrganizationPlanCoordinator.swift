@@ -101,6 +101,7 @@ final class SidebarOrganizationPlanCoordinator {
     func rollback(_ receipt: Receipt, using adapter: any Adapter) throws {
         try receipt.plan.validate()
         try validateOutcome(receipt.plan, after: receipt.after, created: receipt.createdGroups)
+        guard receipts[receipt.plan.id] == receipt else { throw Plan.Failure.rollbackConflict }
         let current = try adapter.inventory()
         try current.validate()
         guard scoped(current, receipt: receipt) == scoped(receipt.after, receipt: receipt) else {
@@ -252,14 +253,22 @@ final class SidebarOrganizationPlanCoordinator {
         }
         try adapter.restoreOrder(order)
         let after = try adapter.inventory()
+        try after.validate()
+        let expectedWorkspaces = current.workspaces.map { row -> Plan.Workspace in
+            var expected = row
+            if changed.contains(row.id) {
+                expected.groupID = receipt.plan.before.workspaces.first { $0.id == row.id }!.groupID
+            }
+            return expected
+        }
         let oldGroups = current.groups.filter { !receipt.createdGroups.values.contains($0.id) }.map { group -> Plan.Group in
             var copy = group
             copy.members.removeAll { changed.contains($0) }
             return copy
         }
-        guard changed.allSatisfy({ id in
-            after.workspaces.first(where: { $0.id == id }) == receipt.plan.before.workspaces.first(where: { $0.id == id })
-        }), after.groups == oldGroups,
+        guard after.windowID == current.windowID,
+        after.order == order, after.workspaces == expectedWorkspaces,
+        after.groups == oldGroups,
         after.selectionFingerprint == current.selectionFingerprint,
         Set(after.workspaces.map(\.id)) == Set(current.workspaces.map(\.id)),
         !after.groups.contains(where: { receipt.createdGroups.values.contains($0.id) }) else {
