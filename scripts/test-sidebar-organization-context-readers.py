@@ -161,6 +161,12 @@ if ["roundtrip", "prepare", "analyze"].contains(args[2]) {
         check("Qwen ancestry cycle held", read("qwen", sid) is None)
         jsonl(qwen, [qrow(first, 42, "user", "Wrong parent shape")])
         check("Qwen invalid parent shape held", read("qwen", sid) is None)
+        no_parent = qrow(first, None, "user", "Missing canonical identity field")
+        del no_parent["parentUuid"]
+        jsonl(qwen, [no_parent])
+        check("Qwen absent parent identity held", read("qwen", sid) is None)
+        jsonl(qwen, [rows[0], dict(qrow(dead, first, "assistant", "Unknown record"), type="unverified-type")])
+        check("Qwen unknown record type held", read("qwen", sid) is None)
         model = qrow(dead, first, "assistant", "Model role response")
         model["message"]["role"] = "model"
         jsonl(qwen, [rows[0], model, dict(qrow(rewind, dead, "system"), subtype="session_artifact_event")])
@@ -192,6 +198,8 @@ if ["roundtrip", "prepare", "analyze"].contains(args[2]) {
         state_path.write_text(json.dumps({k: v for k, v in state.items() if k not in ("id", "version")}))
         jsonl(wire, [{k: v for k, v in message.items() if k != "agentId"} for message in messages])
         check("Kimi legacy exact index main store", texts(read("kimi", kimi_sid)) == ["Exact user intent", "Exact response"])
+        jsonl(wire, [dict(messages[0], agentId=42)])
+        check("Kimi legacy explicit non-string agent identity held", read("kimi", kimi_sid) is None)
         state_path.write_text(json.dumps(dict(state, id=str(uuid.uuid4()))))
         check("Kimi explicit wrong state SID held", read("kimi", kimi_sid) is None)
         state_path.write_text(json.dumps(state))
