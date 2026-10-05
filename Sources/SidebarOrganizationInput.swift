@@ -41,8 +41,10 @@ struct SidebarOrganizationInput: Codable, Equatable, Sendable {
             guard limit > 0 else { return nil }
             var candidate = String(value.prefix(min(1_500, limit)))
             if candidate.count < value.count {
-                guard let boundary = candidate.lastIndex(where: { $0.isWhitespace }) else { return nil }
-                candidate = String(candidate[..<boundary])
+                guard let boundary = candidate.lastIndex(where: {
+                    $0.isWhitespace || !$0.unicodeScalars.allSatisfy({ $0.isASCII })
+                }) else { return nil }
+                candidate = String(candidate[..<(candidate[boundary].isWhitespace ? boundary : candidate.index(after: boundary))])
             }
             let result = String(scrubber.scrub(candidate).prefix(limit))
             return result.isEmpty ? nil : result
@@ -50,10 +52,14 @@ struct SidebarOrganizationInput: Codable, Equatable, Sendable {
 
         func bounded(maximumCharacters: Int, homeDirectory: URL) -> Self {
             var remaining = max(0, min(6_000, maximumCharacters))
+            var unsafeTextDropped = false
             let scrubber = SentryScrubber(homeDirectory: homeDirectory.path)
             func text(_ value: String?) -> String? {
                 guard let value, remaining > 0 else { return nil }
-                guard let result = Self.scrubbedText(value, limit: min(1_500, remaining), scrubber: scrubber) else { return nil }
+                guard let result = Self.scrubbedText(value, limit: min(1_500, remaining), scrubber: scrubber) else {
+                    if !value.isEmpty { unsafeTextDropped = true }
+                    return nil
+                }
                 remaining -= result.count
                 return result
             }
@@ -66,6 +72,7 @@ struct SidebarOrganizationInput: Codable, Equatable, Sendable {
                 guard messages.count < 8, remaining > 0 else { break }
                 if let value = text(message.text) { messages.append(.init(role: message.role, text: value)) }
             }
+            guard !unsafeTextDropped else { return .init(recentMessages: [], contextStatus: .unreadable) }
             return .init(recentMessages: messages.reversed(), currentIntent: intent, summary: shortSummary,
                          compactionSummary: compaction, scope: scope, contextStatus: contextStatus)
         }
