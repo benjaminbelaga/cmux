@@ -63,7 +63,6 @@ final class SidebarOrganizationPlacementLedger {
         if order.count >= 64, let oldest = order.first {
             order.removeFirst()
             receipts[oldest] = nil
-            held.remove(oldest)
             rollbackStarted.remove(oldest)
         }
         receipts[planID] = receipt
