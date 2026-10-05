@@ -61,6 +61,20 @@ if [[ ! -d "$APP_PATH" ]]; then
   echo "error: app bundle not found at $APP_PATH" >&2
   exit 1
 fi
+# Tagged builds rename the executable. Resolve the bundle's declared binary
+# before signing so a missing or malformed name cannot bypass slice checks.
+APP_EXECUTABLE="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$APP_PATH/Contents/Info.plist")"
+case "$APP_EXECUTABLE" in
+  ""|.|..|*/*)
+    echo "error: invalid CFBundleExecutable in app bundle" >&2
+    exit 1
+    ;;
+esac
+APP_BINARY="$APP_PATH/Contents/MacOS/$APP_EXECUTABLE"
+[[ -f "$APP_BINARY" && -x "$APP_BINARY" ]] || {
+  echo "error: declared app executable is missing or not executable" >&2
+  exit 1
+}
 if [[ ! -f "$APP_ENTITLEMENTS" ]]; then
   echo "error: app entitlements not found at $APP_ENTITLEMENTS" >&2
   exit 1
@@ -210,9 +224,11 @@ fi
 "$SCRIPT_DIR/verify-command-palette-nucleo-ffi-artifact.sh" "$APP_PATH"
 # The sidecar must carry exactly the slices the app does: universal for stable
 # and the transitional nightly, one architecture for thinned nightlies.
+APP_ARCHS="$(/usr/bin/lipo -archs "$APP_BINARY")"
+[[ -n "$APP_ARCHS" ]] || { echo "error: declared app executable has no architecture slices" >&2; exit 1; }
 "$SCRIPT_DIR/verify-diff-sidecar-artifact.sh" \
   "$APP_PATH/Contents/Resources/bin/cmux-diff-sidecar" \
-  --archs "$(lipo -archs "$APP_PATH/Contents/MacOS/cmux")" \
+  --archs "$APP_ARCHS" \
   --require-signed
 
 APP_ID="$(/usr/libexec/PlistBuddy -c "Print :com.apple.application-identifier" \
