@@ -60,7 +60,11 @@ struct FakeCommands: CommandRunning {
     let output: String
     func run(directory: String, executable: String, arguments: [String], timeout: TimeInterval?) async -> CommandResult {
         if let index = arguments.firstIndex(of: "--output") {
-            do { try Data(output.utf8).write(to: URL(fileURLWithPath: arguments[index + 1])) }
+            do {
+                try Data(output.utf8).write(to: URL(fileURLWithPath: arguments[index + 1]))
+                let captured = URL(fileURLWithPath: directory).deletingLastPathComponent().appendingPathComponent("last-command.json")
+                try JSONEncoder().encode(arguments).write(to: captured)
+            }
             catch { return .init(stdout: nil, stderr: nil, exitStatus: nil, timedOut: false, executionError: "Fixture write") }
         }
         return .init(stdout: "", stderr: "", exitStatus: 0, timedOut: false, executionError: nil)
@@ -219,6 +223,8 @@ if ["roundtrip", "prepare", "analyze"].contains(args[2]) {
         jsonl(wire, [*messages, {"type": "context.undo", "agentId": "main"}])
         check("Kimi unsupported replay mutation held", read("kimi", kimi_sid) is None)
         check("Supported unreadable status truthful", read("status:kimi", kimi_sid)["contextStatus"] == "unreadable")
+        jsonl(wire, [{"type": "context.undo", "agentId": "main"}, {"type": "fixture.padding", "padding": "x" * 2097152}, *messages])
+        check("Kimi oversized incomplete replay held", read("kimi", kimi_sid) is None)
         jsonl(wire, messages)
         jsonl(index, [{"sessionId": kimi_sid, "sessionDir": str(session)}, {"sessionId": kimi_sid, "deleted": True}])
         check("Kimi latest index deletion held", read("kimi", kimi_sid) is None)
@@ -268,6 +274,13 @@ if ["roundtrip", "prepare", "analyze"].contains(args[2]) {
         legacy_packet = dict(packet, workspaces=[legacy_workspace])
         check("Legacy input decodes without optional fields", invocation("roundtrip", legacy_packet)[0]["workspaces"][0]["revision"] == 7)
         check("Prepare unsupported context remains metadata-only", invocation("prepare", legacy_packet)[0]["workspaces"][0]["sessions"][0]["context"]["contextStatus"] == "metadata-only")
+        unsafe_session = dict(workspace["sessions"][0], context={"recentMessages": [{"role": "user", "text": "x" * 8000}], "contextStatus": "observed"})
+        unsafe_packet = dict(packet, workspaces=[dict(legacy_workspace, sessions=[unsafe_session])])
+        held = invocation("prepare", unsafe_packet)[0]["workspaces"][0]["sessions"][0]["context"]
+        check("Dropped unsafe token context status truthful", held["contextStatus"] == "unreadable" and not held["recentMessages"])
+        unicode_session = dict(unsafe_session, context={"recentMessages": [{"role": "user", "text": "語" * 8000}], "contextStatus": "observed"})
+        unicode_context = invocation("prepare", dict(packet, workspaces=[dict(legacy_workspace, sessions=[unicode_session])]))[0]["workspaces"][0]["sessions"][0]["context"]
+        check("CJK context bounded at safe grapheme boundary", unicode_context["contextStatus"] == "observed" and len((unicode_context["recentMessages"] or [{"text": ""}])[0]["text"]) == 1500)
         large_context = {"recentMessages": [{"role": "user", "text": "Useful word " * 200} for _ in range(8)],
                          "currentIntent": "Intent " * 300, "summary": "Summary " * 300,
                          "compactionSummary": "Snapshot " * 300, "scope": "Scope " * 300}
@@ -287,6 +300,8 @@ if ["roundtrip", "prepare", "analyze"].contains(args[2]) {
         check("Exhausted later session status truthful", bounded["sessions"][-1]["context"]["contextStatus"] == "metadata-only")
         output = {"schemaVersion": 1, "proposals": [], "diagnostics": []}
         check("Legacy output missing registry permits tags", invocation("analyze", legacy_packet, json.dumps(output))[0] is not None)
+        arguments = json.loads((home / "last-command.json").read_text())
+        check("Analyze uses actual canonical rules path", "--rules" in arguments and arguments[arguments.index("--rules") + 1] == str(home / "repos/ecosystem/inventory/session-organization.yaml"))
         check("Actual output registry preserved", invocation("analyze", legacy_packet, json.dumps(dict(output, registryFingerprint="a" * 64)))[0]["registryFingerprint"] == "a" * 64)
         check("Invalid registry output held", invocation("analyze", legacy_packet, json.dumps(dict(output, registryFingerprint="invalid")))[0] is None)
         for name, passed in checks:
