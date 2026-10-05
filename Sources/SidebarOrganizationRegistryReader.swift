@@ -44,7 +44,8 @@ actor SidebarOrganizationRegistryReader {
               let schema = object["schemaVersion"] as? NSNumber, CFGetTypeID(schema) != CFBooleanGetTypeID(), schema == 1,
               object["authority"] as? String == "none",
               let fingerprint = object["registryFingerprint"] as? String,
-              fingerprint.range(of: "^[a-f0-9]{64}$", options: .regularExpression) != nil else { throw Failure.invalidOutput }
+              fingerprint.utf8.count == 64,
+              fingerprint.utf8.allSatisfy({ (48...57).contains($0) || (97...102).contains($0) }) else { throw Failure.invalidOutput }
         return fingerprint
     }
 
