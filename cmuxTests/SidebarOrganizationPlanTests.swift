@@ -15,6 +15,7 @@ struct SidebarOrganizationPlanTests {
         var failAddNumber: Int?
         var addNumber = 0
         var generatedInsteadOfChild = false
+        var failAfterMutation = false
 
         init() {
             let ids = (0..<5).map { _ in UUID() }
@@ -44,6 +45,7 @@ struct SidebarOrganizationPlanTests {
             for index in state.workspaces.indices where children.contains(state.workspaces[index].id) {
                 state.workspaces[index].groupID = id
             }
+            if failAfterMutation { throw Plan.Failure.mutationFailed }
             return id
         }
 
@@ -53,6 +55,7 @@ struct SidebarOrganizationPlanTests {
             if addNumber == failAddNumber { throw Plan.Failure.mutationFailed }
             state.workspaces[state.workspaces.firstIndex { $0.id == workspace }!].groupID = group
             state.groups[state.groups.firstIndex { $0.id == group }!].members.append(workspace)
+            if failAfterMutation { throw Plan.Failure.mutationFailed }
         }
 
         func removeWorkspace(_ workspace: UUID) throws {
@@ -196,6 +199,23 @@ struct SidebarOrganizationPlanTests {
         #expect(throws: Plan.Failure.mutationFailed) { try coordinator.apply(plan, using: native) }
         #expect(native.state == before)
         #expect(native.calls == ["add", "add", "remove", "restore-order"])
+    }
+
+    @Test func failureAfterNativeMutationReconcilesOnlyTheExactOwnedChange() throws {
+        for variant in ["create", "add"] {
+            let native = NativeFixture(), coordinator = Coordinator(), before = native.state
+            native.failAfterMutation = true
+            let plan: Plan
+            if variant == "create" { plan = try native.createPlan() }
+            else {
+                plan = try Plan(sourceFingerprint: native.source, before: before,
+                                assignments: [.init(workspaceID: before.workspaces[1].id,
+                                                    destination: .existing(before.groups[0].id), evidence: .explicitReview)])
+            }
+            #expect(throws: Plan.Failure.mutationFailed) { try coordinator.apply(plan, using: native) }
+            #expect(native.state == before)
+            #expect(native.state.workspaces.count == before.workspaces.count)
+        }
     }
 
     @Test func manuallyChangedMembershipAndPlacementBlockRollback() throws {
