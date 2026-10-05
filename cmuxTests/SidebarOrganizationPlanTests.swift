@@ -80,6 +80,12 @@ struct SidebarOrganizationPlanTests {
             if restoreMode == "no-op" { return }
             state.order = order
             if restoreMode == "partial" { state.order.swapAt(1, 3) }
+            if restoreMode == "corrupt-unrelated" {
+                let row = state.workspaces[4]
+                state.workspaces[4] = .init(id: row.id, revision: row.revision, title: "Unexpected adapter change",
+                                            metadataFingerprint: row.metadataFingerprint, groupID: row.groupID,
+                                            generatedAnchor: row.generatedAnchor)
+            }
         }
 
         func createPlan(_ indices: [Int] = [1, 2]) throws -> Plan {
@@ -255,7 +261,7 @@ struct SidebarOrganizationPlanTests {
     }
 
     @Test func rollbackCannotReportSuccessWhenNativeOrderRestorationDidNotApply() throws {
-        for mode in ["no-op", "partial"] {
+        for mode in ["no-op", "partial", "corrupt-unrelated"] {
             let native = NativeFixture(), coordinator = Coordinator()
             native.reorderCreatedChildren = true
             let receipt = try coordinator.apply(native.createPlan(), using: native)
