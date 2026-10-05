@@ -281,6 +281,20 @@ struct SidebarOrganizationPlanTests {
         #expect(native.calls == ["create"])
     }
 
+    @Test func unsafePartialNativeMutationReportsRecoveryInsteadOfHidingItsOrigin() throws {
+        let native = NativeFixture(), coordinator = Coordinator()
+        native.generatedInsteadOfChild = true
+        let plan = try native.createPlan()
+        do {
+            _ = try coordinator.apply(plan, using: native)
+            Issue.record("Expected the unsafe native result to be held")
+        } catch {
+            #expect(String(reflecting: type(of: error)).contains("RecoveryRequired"))
+            #expect(native.state.workspaces.count == plan.before.workspaces.count)
+            #expect(native.calls == ["create"])
+        }
+    }
+
     @Test func invalidAuthorityDecodedFromExternalPlanCannotMutate() throws {
         let native = NativeFixture(), coordinator = Coordinator()
         let plan = try native.createPlan()
