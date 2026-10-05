@@ -36,6 +36,9 @@ final class SidebarOrganizationPlacementLedger {
     private var order: [UUID] = []
     private var held: Set<UUID> = []
     private var rollbackStarted: Set<UUID> = []
+    // Once unknown outcomes exceed the bounded hold budget, stop granting
+    // automatic operations rather than forgetting an older recovery hold.
+    private var recoverySaturated = false
     private(set) var recoveries: [RecoveryRequired] = []
 
     private func canonical(_ values: [Snapshot]) throws -> [Snapshot] {
@@ -46,6 +49,7 @@ final class SidebarOrganizationPlacementLedger {
 
     func issue(planID: UUID, coreReceiptID: UUID, before: [Snapshot],
                expectedAfter: [Snapshot], observedAfter: [Snapshot]) throws -> Receipt {
+        guard !recoverySaturated else { throw Failure.recoveryRequired }
         guard planID == coreReceiptID, receipts[planID] == nil, !held.contains(planID) else {
             throw Failure.invalidReceipt
         }
@@ -69,7 +73,7 @@ final class SidebarOrganizationPlacementLedger {
 
     private func retained(_ receipt: Receipt) throws {
         guard receipts[receipt.planID] == receipt else { throw Failure.invalidReceipt }
-        guard !held.contains(receipt.planID) else { throw Failure.recoveryRequired }
+        guard !recoverySaturated, !held.contains(receipt.planID) else { throw Failure.recoveryRequired }
     }
 
     /// Call immediately before the synchronous core rollback, with no await in between.
@@ -103,15 +107,14 @@ final class SidebarOrganizationPlacementLedger {
             guard receipt.before == before,
                   expected == receipt.before || expected == receipt.after else { throw Failure.invalidReceipt }
         }
-        held.insert(planID)
+        if held.contains(planID) || held.count < 96 {
+            held.insert(planID)
+        } else {
+            recoverySaturated = true
+        }
         rollbackStarted.remove(planID)
         recoveries.append(.init(planID: planID, phase: phase, cause: cause,
                                 before: before, expected: expected, observed: observed))
         if recoveries.count > 32 { recoveries.removeFirst(recoveries.count - 32) }
-        // Unissued failures are diagnostic holds, never indefinitely growing state.
-        if held.count > 96 {
-            let retainedPlans = Set(order).union(recoveries.map(\.planID))
-            held.formIntersection(retainedPlans)
-        }
     }
 }
