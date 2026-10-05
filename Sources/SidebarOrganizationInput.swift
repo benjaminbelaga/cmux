@@ -53,11 +53,18 @@ struct SidebarOrganizationInput: Codable, Equatable, Sendable {
         func bounded(maximumCharacters: Int, homeDirectory: URL) -> Self {
             var remaining = max(0, min(6_000, maximumCharacters))
             var unsafeTextDropped = false
+            var budgetTextDropped = false
             let scrubber = SentryScrubber(homeDirectory: homeDirectory.path)
             func text(_ value: String?) -> String? {
                 guard let value, remaining > 0 else { return nil }
                 guard let result = Self.scrubbedText(value, limit: min(1_500, remaining), scrubber: scrubber) else {
-                    if !value.isEmpty { unsafeTextDropped = true }
+                    if !value.isEmpty {
+                        let fullSliceIsSafe = value.count <= 1_500 || value.prefix(1_500).contains(where: {
+                            $0.isWhitespace || !$0.unicodeScalars.allSatisfy({ $0.isASCII })
+                        })
+                        if fullSliceIsSafe { budgetTextDropped = true }
+                        else { unsafeTextDropped = true }
+                    }
                     return nil
                 }
                 remaining -= result.count
@@ -73,6 +80,9 @@ struct SidebarOrganizationInput: Codable, Equatable, Sendable {
                 if let value = text(message.text) { messages.append(.init(role: message.role, text: value)) }
             }
             guard !unsafeTextDropped else { return .init(recentMessages: [], contextStatus: .unreadable) }
+            if budgetTextDropped && messages.isEmpty && [intent, compaction, shortSummary, scope].allSatisfy({ $0 == nil }) {
+                return .init(recentMessages: [], contextStatus: .metadataOnly)
+            }
             return .init(recentMessages: messages.reversed(), currentIntent: intent, summary: shortSummary,
                          compactionSummary: compaction, scope: scope, contextStatus: contextStatus)
         }
