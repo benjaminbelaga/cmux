@@ -22,6 +22,8 @@ import os
     private let now: () -> Date
     private let logger = Logger(subsystem: "com.cmuxterm.app", category: "SidebarExtensionLifecycle")
     private var hosts: [UUID: [String: Any]] = [:]
+    private static let runtimeGrantKeys = ["connection_generation", "grant_revision", "manifest_id",
+                                          "api_version", "effective_read_scopes", "effective_action_scopes"]
     private var reconnectObservers: [UUID: AsyncStream<Void>.Continuation] = [:]
 
     /// Creates an isolated diagnostic store for one host process.
@@ -55,6 +57,12 @@ import os
                      "identity_id": identityID, "generation": generation]) { _, new in new }
         if let code { entry["error_code"] = code }
         var host = hosts[hostID] ?? [:]
+        if let previous = host["generation"] as? UInt64 {
+            guard generation >= previous else { return }
+            if generation != previous {
+                for key in Self.runtimeGrantKeys { host[key] = nil }
+            }
+        }
         host.merge(entry) { _, new in new }
         host["state"] = state ?? host["state"] ?? "connecting"
         hosts[hostID] = host
@@ -79,6 +87,18 @@ import os
                              grantRevision: UInt64, manifestID: String?, apiMajor: Int?, apiMinor: Int?,
                              readScopes: [String], actionScopes: [String]) {
         guard var host = hosts[hostID], (host["generation"] as? UInt64) == generation else { return }
+        if let previousConnection = host["connection_generation"] as? UInt64 {
+            guard connectionGeneration >= previousConnection else { return }
+            if connectionGeneration == previousConnection,
+               let previousRevision = host["grant_revision"] as? UInt64 {
+                guard grantRevision >= previousRevision else { return }
+                if grantRevision == previousRevision {
+                    // Re-publishing the same cache must not reset an acknowledged
+                    // transport or allow a different grant to reuse its revision.
+                    return
+                }
+            }
+        }
         host["connection_generation"] = connectionGeneration
         host["grant_revision"] = grantRevision
         host["manifest_id"] = manifestID as Any? ?? NSNull()
