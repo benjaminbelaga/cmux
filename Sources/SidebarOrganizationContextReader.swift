@@ -177,7 +177,8 @@ struct SidebarOrganizationContextReader: Sendable {
                 }
                 byID[id] = merged
             } else { byID[id] = row }
-            if type == "user" || type == "assistant" { leaf = id }
+            let artifact = type == "system" && ["session_artifact_event", "session_artifact_snapshot"].contains(row["subtype"] as? String ?? "")
+            if !artifact { leaf = id }
         }
         guard var current = leaf else { return nil }
         var chain: [[String: Any]] = []
