@@ -389,6 +389,7 @@ struct CMUXInstalledExtensionSidebarHostView: View {
                     },
                     onGrantChanged: { grant in
                         guard recovery.accepts(generation) else { return }
+                        xpcHost.recordRuntimeGrant(diagnostics: diagnostics, hostID: hostID, generation: generation)
                         effectiveGrant = grant
                         if let grant, grant.needsAdditionalApproval {
                             activationDeadline.cancel()
@@ -1404,6 +1405,15 @@ private final class CMUXSidebarExtensionHostXPC {
     var currentEffectiveGrant: CMUXSidebarExtensionEffectiveGrant? {
         guard let bundleIdentifier, let currentManifest else { return nil }
         return grantStore.effectiveGrant(bundleIdentifier: bundleIdentifier, manifest: currentManifest)
+    }
+
+    func recordRuntimeGrant(diagnostics: CMUXSidebarRecoveryDiagnostics, hostID: UUID, generation: UInt64) {
+        diagnostics.runtimeGrant(hostID: hostID, generation: generation,
+            connectionGeneration: connectionGeneration, grantRevision: grantRevision,
+            manifestID: currentManifest?.id,
+            apiMajor: currentManifest?.minimumAPIVersion.major,
+            apiMinor: currentManifest?.minimumAPIVersion.minor,
+            readScopes: allowedScopes.map(\.rawValue), actionScopes: allowedActionScopes.map(\.rawValue))
     }
 
     func update(

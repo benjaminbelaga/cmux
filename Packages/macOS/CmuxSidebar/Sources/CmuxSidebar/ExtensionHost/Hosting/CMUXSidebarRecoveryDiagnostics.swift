@@ -73,6 +73,22 @@ import os
         append(entry)
     }
 
+    /// Publishes the scopes actually cached by one live XPC transport. These
+    /// values are independent of the configured UserDefaults grant.
+    public func runtimeGrant(hostID: UUID, generation: UInt64, connectionGeneration: UInt64,
+                             grantRevision: UInt64, manifestID: String?, apiMajor: Int?, apiMinor: Int?,
+                             readScopes: [String], actionScopes: [String]) {
+        guard var host = hosts[hostID], (host["generation"] as? UInt64) == generation else { return }
+        host["connection_generation"] = connectionGeneration
+        host["grant_revision"] = grantRevision
+        host["manifest_id"] = manifestID as Any? ?? NSNull()
+        host["api_version"] = apiMajor.flatMap { major in apiMinor.map { ["major": major, "minor": $0] } } as Any? ?? NSNull()
+        host["effective_read_scopes"] = readScopes.sorted()
+        host["effective_action_scopes"] = actionScopes.sorted()
+        host["state"] = manifestID == nil ? "blocked" : "connecting"
+        hosts[hostID] = host
+    }
+
     /// Records a provider transition without project or conversation data.
     /// - Parameters:
     ///   - previous: Persisted provider before the transition.
