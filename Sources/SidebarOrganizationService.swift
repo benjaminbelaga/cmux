@@ -10,6 +10,7 @@ actor SidebarOrganizationService: SidebarOrganizationAnalyzing {
     private let temporaryDirectory: URL
     private let contextReader: SidebarOrganizationContextReader
     private let pythonCandidates: [String]
+    private let engineValidation: (@Sendable () -> Bool)?
     private var isRunning = false
 
     init(commands: any CommandRunning = CommandRunner(maximumCaptureBytes: 65_537),
@@ -17,12 +18,14 @@ actor SidebarOrganizationService: SidebarOrganizationAnalyzing {
          temporaryDirectory: URL = FileManager.default.temporaryDirectory,
          engineURL: URL? = nil,
          rulesURL: URL? = nil,
+         engineValidation: (@Sendable () -> Bool)? = nil,
          pythonCandidates: [String] = ["/opt/homebrew/bin/python3", "/usr/local/bin/python3", "/usr/bin/python3"]) {
         self.commands = commands
         self.engineURL = engineURL ?? homeDirectory.appendingPathComponent("repos/ecosystem/scripts/session-organization.py")
         self.rulesURL = rulesURL ?? homeDirectory.appendingPathComponent("repos/ecosystem/inventory/session-organization.yaml")
         self.temporaryDirectory = temporaryDirectory
         self.pythonCandidates = pythonCandidates
+        self.engineValidation = engineValidation
         self.contextReader = SidebarOrganizationContextReader(homeDirectory: homeDirectory)
     }
 
@@ -55,8 +58,9 @@ actor SidebarOrganizationService: SidebarOrganizationAnalyzing {
         isRunning = true
         defer { isRunning = false }
         try Task.checkCancellation()
+        guard engineValidation?() != false else { throw Failure.engineFailed }
         let directory = temporaryDirectory.appendingPathComponent("cmux-organization-" + UUID().uuidString, isDirectory: true)
-        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
         defer { try? FileManager.default.removeItem(at: directory) }
         let inputURL = directory.appendingPathComponent("input.json")
         let outputURL = directory.appendingPathComponent("output.json")
@@ -66,6 +70,7 @@ actor SidebarOrganizationService: SidebarOrganizationAnalyzing {
         let data = try encoder.encode(enriched)
         guard data.count <= 2 * 1024 * 1024 else { throw Failure.invalidInput }
         try data.write(to: inputURL, options: .atomic)
+        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: inputURL.path)
         var python: String?
         for candidate in pythonCandidates {
             let check = await commands.run(directory: directory.path, executable: candidate,
@@ -79,11 +84,13 @@ actor SidebarOrganizationService: SidebarOrganizationAnalyzing {
         if let review {
             let reviewURL = directory.appendingPathComponent("review.json")
             try review.write(to: reviewURL, options: .atomic)
+            try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: reviewURL.path)
             arguments += ["--review", reviewURL.path]
         }
+        guard engineValidation?() != false else { throw Failure.engineFailed }
         let execution = await commands.run(directory: directory.path, executable: python, arguments: arguments, timeout: 20)
         try Task.checkCancellation()
-        guard execution.executionError == nil, !execution.timedOut, execution.exitStatus == 0,
+        guard engineValidation?() != false, execution.executionError == nil, !execution.timedOut, execution.exitStatus == 0,
               (execution.stdout?.utf8.count ?? 0) <= 65_536, (execution.stderr?.utf8.count ?? 0) <= 65_536 else { throw Failure.engineFailed }
         let values = try outputURL.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey, .fileSizeKey])
         guard values.isRegularFile == true, values.isSymbolicLink != true,
@@ -91,7 +98,9 @@ actor SidebarOrganizationService: SidebarOrganizationAnalyzing {
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .iso8601
         let result = try decoder.decode(SidebarOrganizationOutput.self, from: Data(contentsOf: outputURL))
-        guard result.registryFingerprint == nil || result.registryFingerprint?.range(of: "^[0-9a-f]{64}$", options: .regularExpression) != nil,
+        guard result.registryFingerprint == nil || result.registryFingerprint.map({ value in
+                value.utf8.count == 64 && value.utf8.allSatisfy { (48...57).contains($0) || (97...102).contains($0) }
+              }) == true,
               result.schemaVersion == 1, result.proposals.count <= input.workspaces.count,
               Set(result.proposals.map(\.workspaceId)).count == result.proposals.count,
               result.proposals.allSatisfy({ proposal in

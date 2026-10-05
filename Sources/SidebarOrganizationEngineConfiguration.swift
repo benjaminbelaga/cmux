@@ -4,9 +4,10 @@ import Foundation
 /// The isolated signed pair declares immutable engine code and current rules.
 /// Missing or invalid configuration leaves legacy tag analysis available;
 /// it cannot enable a typed folder plan.
-struct SidebarOrganizationEngineConfiguration {
+struct SidebarOrganizationEngineConfiguration: Sendable {
     let engineURL: URL
     let rulesURL: URL
+    private let engineSHA256: String
 
     init?(bundle: Bundle = .main,
           homeDirectory: URL = FileManager.default.homeDirectoryForCurrentUser) {
@@ -22,7 +23,20 @@ struct SidebarOrganizationEngineConfiguration {
         let rules = homeDirectory.appendingPathComponent("repos/ecosystem/inventory/session-organization.yaml")
         guard environment["CMUX_ORGANIZATION_ENGINE_PATH"] == engine.path,
               environment["CMUX_ORGANIZATION_RULES_PATH"] == rules.path,
-              let directoryAttributes = try? FileManager.default.attributesOfItem(atPath: directory.path),
+              Self.validEngine(engine, fingerprint: fingerprint) else { return nil }
+        engineURL = engine
+        rulesURL = rules
+        engineSHA256 = fingerprint
+    }
+
+    /// Shared by classification and registry readback before and after each
+    /// invocation. Rule facts stay current; changed engine code never inherits
+    /// the authority of a previously validated configuration.
+    func isCurrent() -> Bool { Self.validEngine(engineURL, fingerprint: engineSHA256) }
+
+    private static func validEngine(_ engine: URL, fingerprint: String) -> Bool {
+        let directory = engine.deletingLastPathComponent()
+        guard let directoryAttributes = try? FileManager.default.attributesOfItem(atPath: directory.path),
               directoryAttributes[.type] as? FileAttributeType == .typeDirectory,
               (directoryAttributes[.ownerAccountID] as? NSNumber)?.uint32Value == getuid(),
               (directoryAttributes[.posixPermissions] as? NSNumber)?.intValue == 0o700,
@@ -33,9 +47,8 @@ struct SidebarOrganizationEngineConfiguration {
               ((attributes[.size] as? NSNumber)?.intValue ?? Int.max) <= 2 * 1024 * 1024,
               engine.resolvingSymlinksInPath().path == engine.path,
               let data = try? Data(contentsOf: engine),
-              SHA256.hash(data: data).map({ String(format: "%02x", $0) }).joined() == fingerprint else { return nil }
-        engineURL = engine
-        rulesURL = rules
+              SHA256.hash(data: data).map({ String(format: "%02x", $0) }).joined() == fingerprint else { return false }
+        return true
     }
 
     private static func hexadecimal(_ value: String) -> Bool {

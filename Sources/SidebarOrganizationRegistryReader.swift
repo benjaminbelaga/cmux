@@ -9,16 +9,19 @@ actor SidebarOrganizationRegistryReader {
     private let engineURL: URL
     private let rulesURL: URL
     private let pythonCandidates: [String]
+    private let engineValidation: (@Sendable () -> Bool)?
     private var running = false
 
     init(engineURL: URL, rulesURL: URL? = nil,
          homeDirectory: URL = FileManager.default.homeDirectoryForCurrentUser,
          commands: any CommandRunning = CommandRunner(maximumCaptureBytes: 65_537),
+         engineValidation: (@Sendable () -> Bool)? = nil,
          pythonCandidates: [String] = ["/opt/homebrew/bin/python3", "/usr/local/bin/python3", "/usr/bin/python3"]) {
         self.engineURL = engineURL
         self.rulesURL = rulesURL ?? homeDirectory.appendingPathComponent("repos/ecosystem/inventory/session-organization.yaml")
         self.commands = commands
         self.pythonCandidates = pythonCandidates
+        self.engineValidation = engineValidation
     }
 
     func read() async throws -> String {
@@ -26,6 +29,7 @@ actor SidebarOrganizationRegistryReader {
         running = true
         defer { running = false }
         try Task.checkCancellation()
+        guard engineValidation?() != false else { throw Failure.engineFailed }
         var python: String?
         for candidate in pythonCandidates {
             let result = await commands.run(directory: rulesURL.deletingLastPathComponent().path,
@@ -34,10 +38,11 @@ actor SidebarOrganizationRegistryReader {
             if validExecution(result) { python = candidate; break }
         }
         guard let python else { throw Failure.pythonUnavailable }
+        guard engineValidation?() != false else { throw Failure.engineFailed }
         let result = await commands.run(directory: rulesURL.deletingLastPathComponent().path,
             executable: python, arguments: [engineURL.path, "--registry-fingerprint", "--rules", rulesURL.path], timeout: 20)
         try Task.checkCancellation()
-        guard validExecution(result), let output = result.stdout,
+        guard engineValidation?() != false, validExecution(result), let output = result.stdout,
               let data = output.data(using: .utf8) else { throw Failure.engineFailed }
         guard let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               Set(object.keys) == Set(["schemaVersion", "authority", "registryFingerprint"]),
