@@ -208,6 +208,7 @@ extension Workspace {
             environment: workspaceEnvironment.isEmpty ? nil : workspaceEnvironment
         )
         snapshot.workspaceContext = workspaceContext.persisted
+        snapshot.groupPlacement = groupPlacement
         snapshot.captureTodoState(from: self)
         snapshot.dock = _dockSplit?.sessionSnapshot(
             includeScrollback: includeScrollback,
@@ -365,6 +366,7 @@ extension Workspace {
         importance = snapshot.importance.flatMap(Importance.init(rawValue:)) ?? .none
         isMuted = snapshot.isMuted ?? false
         groupId = snapshot.groupId
+        groupPlacement = snapshot.groupPlacement
         restoreTodoState(from: snapshot)
 
         // Status entries and agent PIDs are ephemeral runtime state tied to running
@@ -2727,7 +2729,10 @@ final class Workspace: Identifiable, ObservableObject, FilePreviewTabMetadataHos
     @Published var isMuted: Bool = false
     /// Identifier of the WorkspaceGroup this workspace belongs to, or nil if ungrouped.
     /// The group entity itself lives in `TabManager.workspaceGroups`.
-    @Published var groupId: UUID?
+    @Published var groupId: UUID? {
+        didSet { if oldValue != groupId { groupPlacement = nil } }
+    }
+    @Published var groupPlacement: SidebarOrganizationPlacement?
     @Published var customColor: String?  // hex string, e.g. "#C0392B"
     /// User-defined environment variables applied to every shell spawned in this
     /// workspace: the initial terminal, every later pane/surface/split, and every

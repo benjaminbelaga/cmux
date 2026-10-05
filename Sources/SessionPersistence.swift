@@ -1832,6 +1832,8 @@ struct SessionWorkspaceSnapshot: Codable, Sendable {
     /// backwards-compatible; missing values restore as `false`.
     var isMuted: Bool? = nil
     var groupId: UUID? = nil
+    /// Native provenance; absent in legacy manifests means manual membership.
+    var groupPlacement: SidebarOrganizationPlacement? = nil
     var isManuallyUnread: Bool? = nil
     var hasUnreadIndicator: Bool? = nil
     var notifications: [SessionNotificationSnapshot]? = nil

@@ -9,10 +9,13 @@ final class SidebarOrganizationCoordinator {
     private let service: any SidebarOrganizationAnalyzing
     private let now: () -> Date
     private var exports: [UUID: SidebarOrganizationInput] = [:]
+    private let planIssuer: SidebarOrganizationPlanIssuer
 
-    init(service: any SidebarOrganizationAnalyzing, now: @escaping () -> Date = { Date() }) {
+    init(service: any SidebarOrganizationAnalyzing, registry: SidebarOrganizationRegistryReader? = nil,
+         now: @escaping () -> Date = { Date() }) {
         self.service = service
         self.now = now
+        planIssuer = SidebarOrganizationPlanIssuer(registry: registry)
     }
 
     func export(tabManager: TabManager, workspaceIDs: [UUID]? = nil) async throws -> Data {
@@ -33,7 +36,9 @@ final class SidebarOrganizationCoordinator {
     }
 
     func analyze(tabManager: TabManager, workspaceIDs: [UUID]? = nil,
-                 exportID: UUID? = nil, review: Data? = nil) async -> CmuxSidebarActionResult {
+                 exportID: UUID? = nil, review: Data? = nil,
+                 authorized: @MainActor () -> Bool = { true }) async -> CmuxSidebarActionResult {
+        guard authorized(), !Task.isCancelled else { return .cancelled }
         let input: SidebarOrganizationInput
         if let exportID {
             guard let retained = exports[exportID], now().timeIntervalSince(retained.createdAt) <= 600 else { return stale }
@@ -44,7 +49,8 @@ final class SidebarOrganizationCoordinator {
             let output = try await service.analyze(input, review: review)
             try Task.checkCancellation()
             let current = SidebarOrganizationInventoryBuilder(now: now).make(tabManager: tabManager, workspaceIDs: input.workspaces.compactMap { UUID(uuidString: $0.id) })
-            guard current.windowID == input.windowID, current.workspaces == input.metadata.workspaces else { return stale }
+            guard authorized(), current.windowID == input.windowID,
+                  current.workspaces == input.metadata.workspaces else { return stale }
             // Validate the entire result before mutating native state. Only an
             // exact current repository attachment can automatically add its tag;
             // names, summaries, and semantic references remain reviewable.
@@ -71,10 +77,34 @@ final class SidebarOrganizationCoordinator {
                 prepared.append((workspace, validation.persisted))
             }
             for (workspace, context) in prepared { workspace.workspaceContext.restore(context) }
+            if let fingerprint = output.registryFingerprint,
+               let inventory = try? SidebarOrganizationNativeAdapter(manager: tabManager,
+                    registryFingerprint: fingerprint).inventory() {
+                planIssuer.retain(output: output, input: input, inventory: inventory)
+            }
             if let exportID { exports.removeValue(forKey: exportID) }
             return .accepted
         } catch is CancellationError { return .cancelled }
         catch { return unavailable }
+    }
+
+    /// Returns a reviewable native-issued plan. Applying accepts only this
+    /// retained identity and performs an independent fresh registry readback.
+    func preparePlan(tabManager: TabManager, workspaceIDs: [UUID]? = nil,
+                     authorized: @MainActor () -> Bool) async throws -> SidebarOrganizationPlan {
+        let result = await analyze(tabManager: tabManager, workspaceIDs: workspaceIDs, authorized: authorized)
+        guard result.accepted else { throw SidebarOrganizationPlanIssuer.Failure.unavailable }
+        return try await planIssuer.prepare(manager: tabManager, authorized: authorized)
+    }
+
+    func applyPlan(_ id: UUID, tabManager: TabManager,
+                   authorized: @MainActor () -> Bool) async throws -> SidebarOrganizationPlanCoordinator.Receipt {
+        try await planIssuer.apply(id, manager: tabManager, authorized: authorized)
+    }
+
+    func rollbackPlan(_ id: UUID, tabManager: TabManager,
+                      authorized: @MainActor () -> Bool) throws {
+        try planIssuer.rollback(id, manager: tabManager, authorized: authorized)
     }
 
     private var stale: CmuxSidebarActionResult {

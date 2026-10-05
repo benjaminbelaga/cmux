@@ -26,6 +26,8 @@ public enum CmuxSidebarAction: Codable, Equatable, Sendable {
     case splitBrowser(workspaceID: UUID, surfaceID: UUID, direction: CmuxSidebarSplitDirection, url: String?)
     case toggleSurfaceZoom(workspaceID: UUID, surfaceID: UUID)
     case openURL(String)
+    /// Opens a retained native source after fresh mailbox verification. No URL is accepted.
+    case openSourceReference(workspaceID: UUID, expectedRevision: UInt64, referenceFingerprint: String)
     /// Prompts natively when `title` is nil; an empty title clears the custom name.
     case renameWorkspace(workspaceID: UUID, title: String?)
     /// Prompts natively when `title` is nil; an empty title clears the custom name.
@@ -106,7 +108,7 @@ public enum CmuxSidebarAction: Codable, Equatable, Sendable {
             return url == nil ? [.splitSurface] : [.splitSurface, .openURL]
         case .toggleSurfaceZoom:
             return [.zoomSurface]
-        case .openURL:
+        case .openURL, .openSourceReference:
             return [.openURL]
         case .renameWorkspace:
             return [.renameWorkspace]

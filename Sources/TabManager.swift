@@ -546,6 +546,7 @@ class TabManager: ObservableObject {
     /// GitHub transport state injected process-wide by the app composition root.
     /// The fallback initializer is retained for isolated `TabManager` tests.
     let sidebarOrganizationCoordinator: SidebarOrganizationCoordinator
+    let sidebarSourceReferenceCoordinator = SidebarSourceReferenceCoordinator()
     let pullRequestProbeService: PullRequestProbeService
 
     private let managedDevicePolicy: ManagedDevicePolicy
@@ -571,7 +572,7 @@ class TabManager: ObservableObject {
         createInitialWorkspace: Bool = true,
         tabDragTransferRegistry: TabDragTransferRegistry? = nil,
         commandRunner: any CommandRunning = CommandRunner(),
-        organizationService: any SidebarOrganizationAnalyzing = SidebarOrganizationService(),
+        organizationService: (any SidebarOrganizationAnalyzing)? = nil,
         gitMetadataService: GitMetadataService = GitMetadataService(),
         pullRequestProbeService: PullRequestProbeService? = nil,
         workspaceGitMetadataReader: (any WorkspaceGitMetadataReading)? = nil,
@@ -598,7 +599,20 @@ class TabManager: ObservableObject {
         cloudWorkspaceSelection: CloudWorkspaceSelectionState? = nil
     ) {
         let tabDragTransferRegistry = tabDragTransferRegistry ?? TabDragTransferRegistry()
-        self.sidebarOrganizationCoordinator = SidebarOrganizationCoordinator(service: organizationService)
+        let organizationConfiguration = SidebarOrganizationEngineConfiguration()
+        let organizationRegistry = organizationConfiguration.map {
+            let configuration = $0
+            return SidebarOrganizationRegistryReader(engineURL: configuration.engineURL,
+                rulesURL: configuration.rulesURL, engineValidation: { configuration.isCurrent() })
+        }
+        let organizationValidation: (@Sendable () -> Bool)? = organizationConfiguration.map { configuration in
+            { configuration.isCurrent() }
+        }
+        self.sidebarOrganizationCoordinator = SidebarOrganizationCoordinator(
+            service: organizationService ?? SidebarOrganizationService(
+                engineURL: organizationConfiguration?.engineURL, rulesURL: organizationConfiguration?.rulesURL,
+                engineValidation: organizationValidation),
+            registry: organizationRegistry)
         self.managedDevicePolicy = managedDevicePolicy
         self.cloudWorkspaceSelection = cloudWorkspaceSelection ?? CloudWorkspaceSelectionState(scopeProvider: { nil })
         self.settings = settings
@@ -2363,6 +2377,10 @@ class TabManager: ObservableObject {
             placement: placement,
             referenceWorkspaceId: referenceWorkspaceId
         )
+        // A deliberate same-folder move also takes ownership from an automatic plan.
+        if let workspace = tabs.first(where: { $0.id == workspaceId }), workspace.groupId == groupId {
+            workspace.groupPlacement = nil
+        }
     }
 
     func removeWorkspaceFromGroup(workspaceId: UUID) {

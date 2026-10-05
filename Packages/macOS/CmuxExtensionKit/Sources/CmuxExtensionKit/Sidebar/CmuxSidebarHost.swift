@@ -102,6 +102,15 @@ public struct CmuxSidebarHost {
         try await send(.openURL(url.absoluteString))
     }
 
+    /// Deliberately opens an exact source retained by the current native context.
+    /// CMUX re-verifies the mailbox, source and revision before opening.
+    public func openSourceReference(workspaceID: UUID, expectedRevision: UInt64,
+                                    referenceFingerprint: String) async throws {
+        try await send(.openSourceReference(workspaceID: workspaceID,
+                                           expectedRevision: expectedRevision,
+                                           referenceFingerprint: referenceFingerprint))
+    }
+
     /// Requests that CMUX create a terminal surface.
     ///
     /// Extensions can ask CMUX to create the surface, but cannot seed shell

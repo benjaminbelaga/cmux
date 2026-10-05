@@ -52,7 +52,7 @@ struct SidebarOrganizationInventoryBuilder {
                 groupName: groupID.flatMap { groups[$0]?.name },
                 // Legacy native groups have no stored classification origin.
                 // They retain the conservative manual boundary.
-                groupOrigin: groupID == nil ? nil : "manual",
+                groupOrigin: groupID == nil ? nil : (workspace.groupPlacement?.origin.rawValue ?? "manual"),
                 sourceReferences: references, serviceObservations: observations.isEmpty ? nil : observations)
         }
         return .init(id: UUID(), windowID: tabManager.windowId, createdAt: observedAt, workspaces: workspaces)

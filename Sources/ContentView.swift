@@ -13396,7 +13396,31 @@ struct VerticalTabsSidebar: View, Equatable {
             refreshExtensionSidebarSnapshot()
             return .accepted
         case .analyzeWorkspaceContexts(let workspaceIDs):
-            return await tabManager.sidebarOrganizationCoordinator.analyze(tabManager: tabManager, workspaceIDs: workspaceIDs)
+            guard let windowID = tabManager.windowId else { return .cancelled }
+            return await tabManager.sidebarOrganizationCoordinator.analyze(
+                tabManager: tabManager, workspaceIDs: workspaceIDs, authorized: {
+                    authorization.isValid && tabManager.windowId == windowID
+                        && AppDelegate.shared?.tabManagerFor(windowId: windowID) === tabManager
+                })
+        case .openSourceReference(let workspaceID, let expectedRevision, let fingerprint):
+            guard let windowID = tabManager.windowId,
+                  AppDelegate.shared?.tabManagerFor(windowId: windowID) === tabManager else { return .cancelled }
+            do {
+                try await tabManager.sidebarSourceReferenceCoordinator.open(
+                    manager: tabManager, workspaceID: workspaceID, expectedRevision: expectedRevision,
+                    referenceFingerprint: fingerprint, authorized: {
+                        authorization.isValid && tabManager.windowId == windowID
+                            && AppDelegate.shared?.tabManagerFor(windowId: windowID) === tabManager
+                            && AppDelegate.shared?.tabManagerFor(tabId: workspaceID) === tabManager
+                    })
+                refreshExtensionSidebarSnapshot()
+                return .accepted
+            } catch is CancellationError { return .cancelled }
+            catch SidebarSourceReferenceCoordinator.Failure.revisionConflict {
+                return .rejected(String(localized: "sidebar.extensions.context.revisionConflict", defaultValue: "This workspace changed. Refresh before editing its context."), reason: .revisionConflict)
+            } catch {
+                return .rejected(String(localized: "sidebar.extensions.action.urlRejected", defaultValue: "URL could not be opened"))
+            }
         case .createWorkspace(let title, let workingDirectory, let select):
             guard let workspace = tabManager.addWorkspaceIfActive(
                 title: title,
