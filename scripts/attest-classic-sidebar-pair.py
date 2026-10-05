@@ -14,6 +14,7 @@ import stat
 import hashlib
 import io
 import json
+import os
 from pathlib import Path
 import plistlib
 import re
@@ -424,7 +425,8 @@ def main():
         result = attest(args.pair_config, args.host_receipt, args.source_receipt, args.expected_team_id)
     if args.output:
         require(not args.output.exists(), "immutable attestation output already exists")
-        with args.output.open("x") as destination:
+        descriptor = os.open(args.output, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(descriptor, "w") as destination:
             destination.write(json.dumps(result, sort_keys=True, indent=2) + "\n")
     print(json.dumps({key: result[key] for key in ("schemaVersion", "verificationState",
         "verified_pair_fingerprint", "executable_config_fingerprint", "runtimeVerified")}))
