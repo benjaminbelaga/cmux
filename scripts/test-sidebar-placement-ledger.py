@@ -54,7 +54,60 @@ HARNESS = r'''import Foundation
    #endif
    try core.rollback(receipt,using:native)
   } catch {held=true}
-  let checks=["same-group manual override holds before any core write":held && native.writes==writes && native.state.workspaces[1].groupID==native.group]
+  var checks=["same-group manual override holds before any core write":held && native.writes==writes && native.state.workspaces[1].groupID==native.group]
+  #if PLACEMENT_LEDGER
+  typealias L=SidebarOrganizationPlacementLedger
+  func rejects(_ action:() throws -> Void)->Bool{do{try action();return false}catch{return true}}
+  func fixture(_ ledger:L, planID:UUID=UUID()) throws -> L.Receipt {
+   let id=UUID(),group=UUID()
+   return try ledger.issue(planID:planID,coreReceiptID:planID,
+    before:[.init(workspaceID:id,groupID:nil,placement:nil)],
+    expectedAfter:[.init(workspaceID:id,groupID:group,placement:.init(planID:planID))],
+    observedAfter:[.init(workspaceID:id,groupID:group,placement:.init(planID:planID))])
+  }
+  let normal=L(),good=try fixture(normal)
+  checks["finish cannot skip preflight"] = rejects{try normal.finishRollback(good,observed:good.before)}
+  checks["verified preflight returns exact legacy nil"] = try normal.beforeRollback(good,observed:good.after) == good.before && good.before[0].placement == nil
+  try normal.finishRollback(good,observed:good.before)
+  checks["successful restoration consumes exact receipt"] = rejects{_ = try normal.beforeRollback(good,observed:good.after)}
+  let wrong=L(),valid=try fixture(wrong)
+  let forged=try L().issue(planID:valid.planID,coreReceiptID:valid.coreReceiptID,before:valid.before,expectedAfter:valid.after,observedAfter:valid.after)
+  checks["forged issuance cannot rollback"] = rejects{_ = try wrong.beforeRollback(forged,observed:valid.after)}
+  checks["duplicate plan cannot reissue"] = rejects{_ = try wrong.issue(planID:valid.planID,coreReceiptID:valid.planID,before:valid.before,expectedAfter:valid.after,observedAfter:valid.after)}
+  checks["core identity must match plan"] = rejects{_ = try L().issue(planID:UUID(),coreReceiptID:UUID(),before:valid.before,expectedAfter:valid.after,observedAfter:valid.after)}
+  let newPlan=UUID()
+  let actual=[L.Snapshot(workspaceID:valid.before[0].workspaceID,groupID:UUID(),placement:.init(planID:newPlan))]
+  checks["unverified native readback cannot issue"] = rejects{_ = try L().issue(planID:newPlan,coreReceiptID:newPlan,before:valid.before,expectedAfter:actual,observedAfter:valid.before)}
+  checks["duplicate workspace snapshots rejected"] = rejects{_ = try wrong.beforeRollback(valid,observed:valid.after+valid.after)}
+  checks["other workspace cannot substitute"] = rejects{_ = try wrong.beforeRollback(valid,observed:[.init(workspaceID:UUID(),groupID:valid.after[0].groupID,placement:valid.after[0].placement)])}
+  let manual=try JSONDecoder().decode(SidebarOrganizationPlacement.self,from:Data("{\"origin\":\"manual\",\"planID\":null}".utf8))
+  checks["explicit manual same-group provenance is drift"] = rejects{_ = try wrong.beforeRollback(valid,observed:[.init(workspaceID:valid.after[0].workspaceID,groupID:valid.after[0].groupID,placement:manual)])}
+  _ = try wrong.beforeRollback(valid,observed:valid.after)
+  checks["failed restoration never consumes receipt"] = rejects{try wrong.finishRollback(valid,observed:valid.after)}
+  try wrong.recordRecovery(planID:valid.planID,phase:.placementRestore,cause:.outcomeDiffers,before:valid.before,expected:valid.before,observed:valid.after)
+  checks["unknown restoration blocks preflight and finish"] = rejects{_ = try wrong.beforeRollback(valid,observed:valid.after)} && rejects{try wrong.finishRollback(valid,observed:valid.before)}
+  checks["recovery preserves exact actual observation"] = wrong.recoveries.last?.observed == valid.after && wrong.recoveries.last?.before == valid.before
+  let bounded=L();let oldest=try fixture(bounded)
+  for _ in 0..<64 {_ = try fixture(bounded)}
+  checks["evicted receipt is closed"] = rejects{_ = try bounded.beforeRollback(oldest,observed:oldest.after)}
+  let diagnostics=L()
+  for _ in 0..<40 {try diagnostics.recordRecovery(planID:UUID(),phase:.applyReadback,cause:.observedUnavailable,before:valid.before,expected:valid.after,observed:nil)}
+  checks["diagnostic retention is bounded and unavailable stays nil"] = diagnostics.recoveries.count == 32 && diagnostics.recoveries.allSatisfy{$0.observed == nil}
+  let oversized=(0..<257).map{_ in L.Snapshot(workspaceID:UUID(),groupID:nil,placement:nil)}
+  checks["affected snapshot budget cannot be exceeded"] = rejects{_ = try L().issue(planID:newPlan,coreReceiptID:newPlan,before:oversized,expectedAfter:oversized,observedAfter:oversized)}
+  let successNative=Native(),successCore=SidebarOrganizationPlanCoordinator(),successLedger=L()
+  let successPlan=try SidebarOrganizationPlan(sourceFingerprint:successNative.sourceFingerprint(),before:successNative.state,assignments:[.init(workspaceID:successNative.target,destination:.existing(successNative.group),evidence:.registeredRepository)])
+  let successBefore=[L.Snapshot(workspaceID:successNative.target,groupID:nil,placement:nil)]
+  let successReceipt=try successCore.apply(successPlan,using:successNative)
+  successNative.placement = .init(planID:successPlan.id)
+  let successAfter=[L.Snapshot(workspaceID:successNative.target,groupID:successNative.group,placement:successNative.placement)]
+  let successRetained=try successLedger.issue(planID:successPlan.id,coreReceiptID:successReceipt.plan.id,before:successBefore,expectedAfter:successAfter,observedAfter:successAfter)
+  let restore=try successLedger.beforeRollback(successRetained,observed:successAfter)
+  try successCore.rollback(successReceipt,using:successNative)
+  successNative.placement=restore[0].placement
+  try successLedger.finishRollback(successRetained,observed:[.init(workspaceID:successNative.target,groupID:successNative.state.workspaces[1].groupID,placement:successNative.placement)])
+  checks["real core rollback preserves unrelated manual member"] = successNative.state == successPlan.before && successNative.placement == nil
+  #endif
   print(String(decoding:try JSONSerialization.data(withJSONObject:checks,options:.sortedKeys),as:UTF8.self))
  }
 }
