@@ -52,6 +52,7 @@ actor Probe: CommandRunning {
   }
   var extra=good;extra["review"]="accepted";checks["extra authority rejected"] = await rejects(encoded(extra))
   var missing=good;missing["registryFingerprint"]=nil;checks["missing fingerprint rejected"] = await rejects(encoded(missing))
+  var newline=good;newline["registryFingerprint"]=hash+"\n";checks["trailing newline fingerprint rejected"] = await rejects(encoded(newline))
   checks["malformed output rejected"] = await rejects("not json")
   checks["oversized stdout rejected"] = await rejects(String(repeating:"x",count:65_537))
   for mode in ["python-missing","timeout","nonzero","transport","stderr-oversize"] {
@@ -79,7 +80,7 @@ def main():
         for name, passed in checks.items():
             print(('PASS ' if passed else 'FAIL ')+name)
         print(json.dumps({'passed': sum(checks.values()), 'failed': sum(not x for x in checks.values())}))
-        return 0 if len(checks) == 19 and all(checks.values()) else 1
+        return 0 if len(checks) == 20 and all(checks.values()) else 1
 
 
 if __name__ == '__main__':
