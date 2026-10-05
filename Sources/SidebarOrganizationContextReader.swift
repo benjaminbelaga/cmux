@@ -163,8 +163,8 @@ struct SidebarOrganizationContextReader: Sendable {
         var leaf: String?
         for row in rows {
             guard row["sessionId"] as? String == sid, let id = row["uuid"] as? String, !id.isEmpty,
-                  let type = row["type"] as? String else { return nil }
-            if let parent = row["parentUuid"], !(parent is NSNull), !(parent is String) { return nil }
+                  let type = row["type"] as? String, ["user", "assistant", "tool_result", "system"].contains(type),
+                  let parent = row["parentUuid"], parent is NSNull || parent is String else { return nil }
             if let prior = byID[id] {
                 // Qwen streams fragments under the same UUID. Only compatible
                 // identities may concatenate; a conflicting branch is held.
@@ -240,7 +240,10 @@ struct SidebarOrganizationContextReader: Sendable {
         var messages: [SidebarOrganizationInput.Context.Message] = []
         for row in rows {
             guard let type = row["type"] as? String else { return nil }
-            if let agent = row["agentId"] as? String { if agent != "main" { continue } }
+            if let identity = row["agentId"] {
+                guard let agent = identity as? String else { return nil }
+                if agent != "main" { continue }
+            }
             else if !legacy && type.hasPrefix("context.") { return nil }
             guard type.hasPrefix("context.") else { continue }
             if type == "context.clear" { messages.removeAll(); continue }
