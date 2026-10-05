@@ -124,7 +124,13 @@ struct SidebarOrganizationPlanTests {
         let added = Plan.Workspace(id: UUID(), revision: 0, title: "New manual session",
                                    metadataFingerprint: String(repeating: "e", count: 64), groupID: nil, generatedAnchor: false)
         native.state.workspaces.append(added); native.state.order.append(added.id)
+        let manual = native.state.groups[0]
+        native.state.groups[0] = .init(id: manual.id, name: "Human folder rename", externalID: manual.externalID,
+                                       anchorID: manual.anchorID, generatedAnchor: false, pinned: manual.pinned,
+                                       collapsed: manual.collapsed, metadataFingerprint: String(repeating: "9", count: 64),
+                                       members: manual.members)
         try coordinator.rollback(receipt, using: native)
+        #expect(native.state.groups[0].name == "Human folder rename")
         #expect(native.state.workspaces[4].title == "Human title")
         #expect(native.state.workspaces.last == added)
         #expect(native.state.order.last == added.id)

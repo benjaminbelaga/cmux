@@ -39,6 +39,7 @@ final class SidebarOrganizationPlanCoordinator {
         guard before == plan.before else { throw Plan.Failure.staleInventory }
         var created: [String: UUID] = [:]
         var changed: [UUID] = []
+        var attemptedKeys: Set<String> = []
         do {
             for assignment in plan.assignments {
                 let destination: UUID
@@ -51,18 +52,19 @@ final class SidebarOrganizationPlanCoordinator {
                             if case .create(let other, _) = row.destination { return other == key }
                             return false
                         }.map(\.workspaceID)
+                        changed.append(contentsOf: children)
+                        attemptedKeys.insert(key)
                         destination = try adapter.createGroup(name: name, children: children,
                                                               externalID: plan.externalID(for: key))
                         guard !before.groups.contains(where: { $0.id == destination }),
                               !created.values.contains(destination) else { throw Plan.Failure.outcomeDiffers }
                         created[key] = destination
-                        changed.append(contentsOf: children)
                     }
                 }
                 // Newly created groups already contain all their children.
                 if case .existing = assignment.destination {
-                    try adapter.addWorkspace(assignment.workspaceID, to: destination)
                     changed.append(assignment.workspaceID)
+                    try adapter.addWorkspace(assignment.workspaceID, to: destination)
                 }
             }
             let after = try adapter.inventory()
@@ -79,6 +81,17 @@ final class SidebarOrganizationPlanCoordinator {
             // A partial native result is inspected before undo. Unknown changes
             // fail closed; no generic reset can overwrite another operation.
             let current = try adapter.inventory()
+            // A throw after creation may lose the returned UUID. Reconcile
+            // only the exact external identity, never a group name match.
+            for assignment in plan.assignments {
+                guard case .create(let key, _) = assignment.destination,
+                      attemptedKeys.contains(key), created[key] == nil else { continue }
+                let matches = current.groups.filter { $0.externalID == plan.externalID(for: key) }
+                if let group = matches.first, matches.count == 1,
+                   !plan.before.groups.contains(where: { $0.id == group.id }) {
+                    created[key] = group.id
+                }
+            }
             let partial = Receipt(plan: plan, after: current, createdGroups: created)
             try undo(partial, changed: Set(changed), using: adapter)
             throw error
@@ -184,6 +197,25 @@ final class SidebarOrganizationPlanCoordinator {
             }
             row.groupID = original.groupID
             guard row == original else { throw Plan.Failure.rollbackConflict }
+            let actual = current.workspaces.first { $0.id == id }!
+            let target = receipt.plan.assignments.first { $0.workspaceID == id }!
+            let destination: UUID?
+            switch target.destination {
+            case .existing(let id): destination = id
+            case .create(let key, _): destination = receipt.createdGroups[key]
+            }
+            guard actual.groupID == nil || actual.groupID == destination else { throw Plan.Failure.rollbackConflict }
+        }
+        let touchedExistingGroups = Set(receipt.plan.assignments.compactMap { assignment -> UUID? in
+            guard changed.contains(assignment.workspaceID),
+                  case .existing(let id) = assignment.destination else { return nil }
+            return id
+        })
+        for before in receipt.plan.before.groups where touchedExistingGroups.contains(before.id) {
+            guard var group = current.groups.first(where: { $0.id == before.id }),
+                  Set(group.members).subtracting(changed) == Set(before.members) else { throw Plan.Failure.rollbackConflict }
+            group.members = before.members
+            guard group == before else { throw Plan.Failure.rollbackConflict }
         }
         // Refuse a created group that gained an unowned child or changed its
         // stable identity. Ungrouping it would overwrite manual membership.
