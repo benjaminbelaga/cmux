@@ -97,6 +97,10 @@ HARNESS = r'''import Foundation
   try saturated.recordRecovery(planID:unknownPlan,phase:.applyReadback,cause:.observedUnavailable,before:valid.before,expected:valid.after,observed:nil)
   for _ in 0..<100 {try saturated.recordRecovery(planID:UUID(),phase:.applyReadback,cause:.observedUnavailable,before:valid.before,expected:valid.after,observed:nil)}
   checks["bounded recovery saturation never clears an old retry hold"] = rejects{_ = try fixture(saturated,planID:unknownPlan)}
+  let evictedHeld=L(),heldReceipt=try fixture(evictedHeld)
+  try evictedHeld.recordRecovery(planID:heldReceipt.planID,phase:.coreRollback,cause:.nativeFailure,before:heldReceipt.before,expected:heldReceipt.after,observed:nil)
+  for _ in 0..<64 {_ = try fixture(evictedHeld)}
+  checks["receipt eviction never clears an issued recovery hold"] = rejects{_ = try fixture(evictedHeld,planID:heldReceipt.planID)}
   let oversized=(0..<257).map{_ in L.Snapshot(workspaceID:UUID(),groupID:nil,placement:nil)}
   checks["affected snapshot budget cannot be exceeded"] = rejects{_ = try L().issue(planID:newPlan,coreReceiptID:newPlan,before:oversized,expectedAfter:oversized,observedAfter:oversized)}
   let successNative=Native(),successCore=SidebarOrganizationPlanCoordinator(),successLedger=L()
