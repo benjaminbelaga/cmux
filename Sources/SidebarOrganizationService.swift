@@ -6,6 +6,7 @@ actor SidebarOrganizationService: SidebarOrganizationAnalyzing {
     enum Failure: Error { case busy, invalidInput, pythonUnavailable, engineFailed, invalidOutput }
     private let commands: any CommandRunning
     private let engineURL: URL
+    private let rulesURL: URL
     private let temporaryDirectory: URL
     private let contextReader: SidebarOrganizationContextReader
     private let pythonCandidates: [String]
@@ -15,9 +16,11 @@ actor SidebarOrganizationService: SidebarOrganizationAnalyzing {
          homeDirectory: URL = FileManager.default.homeDirectoryForCurrentUser,
          temporaryDirectory: URL = FileManager.default.temporaryDirectory,
          engineURL: URL? = nil,
+         rulesURL: URL? = nil,
          pythonCandidates: [String] = ["/opt/homebrew/bin/python3", "/usr/local/bin/python3", "/usr/bin/python3"]) {
         self.commands = commands
         self.engineURL = engineURL ?? homeDirectory.appendingPathComponent("repos/ecosystem/scripts/session-organization.py")
+        self.rulesURL = rulesURL ?? homeDirectory.appendingPathComponent("repos/ecosystem/inventory/session-organization.yaml")
         self.temporaryDirectory = temporaryDirectory
         self.pythonCandidates = pythonCandidates
         self.contextReader = SidebarOrganizationContextReader(homeDirectory: homeDirectory)
@@ -72,7 +75,7 @@ actor SidebarOrganizationService: SidebarOrganizationAnalyzing {
                (check.stdout?.utf8.count ?? 0) <= 65_536, (check.stderr?.utf8.count ?? 0) <= 65_536 { python = candidate; break }
         }
         guard let python else { throw Failure.pythonUnavailable }
-        var arguments = [engineURL.path, "--input", inputURL.path, "--output", outputURL.path]
+        var arguments = [engineURL.path, "--rules", rulesURL.path, "--input", inputURL.path, "--output", outputURL.path]
         if let review {
             let reviewURL = directory.appendingPathComponent("review.json")
             try review.write(to: reviewURL, options: .atomic)

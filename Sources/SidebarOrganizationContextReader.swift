@@ -103,7 +103,7 @@ struct SidebarOrganizationContextReader: Sendable {
         guard var result = read(session, maximumCharacters: maximumCharacters) else {
             return .init(recentMessages: [], contextStatus: .unreadable)
         }
-        result.contextStatus = .observed
+        if result.contextStatus == nil { result.contextStatus = .observed }
         return result.bounded(maximumCharacters: maximumCharacters, homeDirectory: homeDirectory)
     }
 
@@ -129,8 +129,8 @@ struct SidebarOrganizationContextReader: Sendable {
         return data
     }
 
-    private func records(_ url: URL) -> [[String: Any]]? {
-        guard let data = boundedData(url, maximumBytes: 2_097_152, tail: true) else { return nil }
+    private func records(_ url: URL, tail: Bool = true) -> [[String: Any]]? {
+        guard let data = boundedData(url, maximumBytes: 2_097_152, tail: tail) else { return nil }
         let lines = data.split(separator: 10)
         guard lines.count <= 10_000 else { return nil }
         var result: [[String: Any]] = []
@@ -236,7 +236,9 @@ struct SidebarOrganizationContextReader: Sendable {
               main["parentAgentId"] == nil || main["parentAgentId"] is NSNull else { return nil }
         let mainHome = URL(fileURLWithPath: homedir).standardizedFileURL
         guard mainHome == directory.appendingPathComponent("agents/main").standardizedFileURL,
-              let rows = records(mainHome.appendingPathComponent("wire.jsonl")) else { return nil }
+              // Kimi events mutate prior context; a partial wire cannot prove
+              // the replay state. Hold an oversized store instead of guessing.
+              let rows = records(mainHome.appendingPathComponent("wire.jsonl"), tail: false) else { return nil }
         var messages: [SidebarOrganizationInput.Context.Message] = []
         for row in rows {
             guard let type = row["type"] as? String else { return nil }
