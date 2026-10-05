@@ -11,6 +11,12 @@ struct SidebarOrganizationContextReader: Sendable {
         guard maximumCharacters > 0 else { return nil }
         let tool = session.toolId
         let budget = min(6_000, maximumCharacters)
+        if ["qwen", "qwen_code", "qwen-code"].contains(tool) {
+            return readQwen(session.sessionId, maximumCharacters: budget)
+        }
+        if ["kimi", "kimi_code", "kimi-code"].contains(tool) {
+            return readKimi(session.sessionId, maximumCharacters: budget)
+        }
         if ["opencode", "opencode-go", "opencode_go"].contains(tool) {
             return readOpenCode(session.sessionId, maximumCharacters: budget)
         }
@@ -83,6 +89,172 @@ struct SidebarOrganizationContextReader: Sendable {
             remaining -= bounded.count
         }
         return messages.isEmpty ? nil : .init(recentMessages: messages.reversed())
+    }
+
+    /// Unsupported harnesses and exhausted budgets are metadata-only; a supported
+    /// store that cannot establish exact identity is unreadable, never guessed.
+    func context(for session: SidebarOrganizationInput.Session, maximumCharacters: Int) -> SidebarOrganizationInput.Context {
+        let supported = ["qwen", "qwen_code", "qwen-code", "kimi", "kimi_code", "kimi-code",
+                         "opencode", "opencode-go", "opencode_go", "codex", "claude", "claude_code",
+                         "commandcode", "command_code"].contains(session.toolId)
+        guard supported, maximumCharacters > 0 else {
+            return .init(recentMessages: [], contextStatus: .metadataOnly)
+        }
+        guard var result = read(session, maximumCharacters: maximumCharacters) else {
+            return .init(recentMessages: [], contextStatus: .unreadable)
+        }
+        result.contextStatus = .observed
+        return result.bounded(maximumCharacters: maximumCharacters, homeDirectory: homeDirectory)
+    }
+
+    private func safeSID(_ sid: String) -> Bool {
+        !sid.isEmpty && sid.count <= 128 && sid.utf8.allSatisfy {
+            (48...57).contains($0) || (65...90).contains($0) || (97...122).contains($0) || $0 == 45 || $0 == 95
+        }
+    }
+
+    private func boundedData(_ url: URL, maximumBytes: Int, tail: Bool = false) -> Data? {
+        guard !containsSymbolicLink(url),
+              (try? url.resourceValues(forKeys: [.isRegularFileKey]))?.isRegularFile == true,
+              let handle = try? FileHandle(forReadingFrom: url) else { return nil }
+        defer { try? handle.close() }
+        guard let length = try? handle.seekToEnd(), tail || length <= maximumBytes,
+              (try? handle.seek(toOffset: tail && length > maximumBytes ? length - UInt64(maximumBytes) : 0)) != nil,
+              var data = try? handle.read(upToCount: maximumBytes) else { return nil }
+        // A bounded tail may start inside a JSON record. Never decode that fragment.
+        if tail && length > maximumBytes {
+            guard let newline = data.firstIndex(of: 10) else { return nil }
+            data = Data(data.suffix(from: data.index(after: newline)))
+        }
+        return data
+    }
+
+    private func records(_ url: URL) -> [[String: Any]]? {
+        guard let data = boundedData(url, maximumBytes: 2_097_152, tail: true) else { return nil }
+        let lines = data.split(separator: 10)
+        guard lines.count <= 10_000 else { return nil }
+        var result: [[String: Any]] = []
+        for line in lines {
+            guard let value = try? JSONSerialization.jsonObject(with: Data(line)) as? [String: Any] else { return nil }
+            result.append(value)
+        }
+        return result
+    }
+
+    private func readQwen(_ sid: String, maximumCharacters: Int) -> SidebarOrganizationInput.Context? {
+        guard safeSID(sid) else { return nil }
+        let root = homeDirectory.appendingPathComponent(".qwen/projects")
+        guard !containsSymbolicLink(root), let enumeration = FileManager.default.enumerator(at: root,
+            includingPropertiesForKeys: [.isRegularFileKey, .isSymbolicLinkKey], options: [.skipsHiddenFiles]) else { return nil }
+        var candidates: [URL] = []
+        var scanned = 0
+        while let url = enumeration.nextObject() as? URL {
+            scanned += 1
+            guard scanned <= 10_000, enumeration.level <= 5 else { return nil }
+            if (try? url.resourceValues(forKeys: [.isSymbolicLinkKey]))?.isSymbolicLink == true {
+                enumeration.skipDescendants(); continue
+            }
+            if url.lastPathComponent == sid + ".jsonl", url.deletingLastPathComponent().lastPathComponent == "chats" {
+                candidates.append(url)
+            }
+        }
+        guard candidates.count == 1, let url = candidates.first, let rows = records(url) else { return nil }
+        var byID: [String: [String: Any]] = [:]
+        var leaf: String?
+        for row in rows {
+            guard row["sessionId"] as? String == sid, let id = row["uuid"] as? String, !id.isEmpty,
+                  let type = row["type"] as? String else { return nil }
+            if let parent = row["parentUuid"], !(parent is NSNull), !(parent is String) { return nil }
+            if let prior = byID[id] {
+                // Qwen streams fragments under the same UUID. Only compatible
+                // identities may concatenate; a conflicting branch is held.
+                guard prior["type"] as? String == type,
+                      prior["parentUuid"] as? String == row["parentUuid"] as? String else { return nil }
+                var merged = prior
+                if var message = prior["message"] as? [String: Any], let next = row["message"] as? [String: Any] {
+                    message["parts"] = (message["parts"] as? [[String: Any]] ?? []) + (next["parts"] as? [[String: Any]] ?? [])
+                    merged["message"] = message
+                }
+                byID[id] = merged
+            } else { byID[id] = row }
+            if type == "user" || type == "assistant" { leaf = id }
+        }
+        guard var current = leaf else { return nil }
+        var chain: [[String: Any]] = []
+        var visited = Set<String>()
+        while true {
+            guard visited.insert(current).inserted, let row = byID[current] else { return nil }
+            chain.append(row)
+            guard let parent = row["parentUuid"] as? String else { break }
+            guard !parent.isEmpty else { return nil }
+            current = parent
+        }
+        let ordered = chain.reversed()
+        var messages: [SidebarOrganizationInput.Context.Message] = []
+        var compaction: String?
+        var scope: String?
+        for row in ordered {
+            if let cwd = row["cwd"] as? String { scope = cwd }
+            if row["type"] as? String == "system", row["subtype"] as? String == "chat_compression",
+               let payload = row["systemPayload"] as? [String: Any],
+               let info = payload["info"] as? [String: Any], info["compressionStatus"] as? Int == 1,
+               let history = payload["compressedHistory"] as? [[String: Any]] {
+                // Only the canonical compression snapshot is descriptive context.
+                let snapshots = history.flatMap { $0["parts"] as? [[String: Any]] ?? [] }
+                    .compactMap { $0["text"] as? String }.filter { $0.contains("<state_snapshot>") && $0.contains("</state_snapshot>") }
+                compaction = snapshots.last
+            }
+            guard let type = row["type"] as? String, ["user", "assistant"].contains(type),
+                  let message = row["message"] as? [String: Any] else { continue }
+            let text = (message["parts"] as? [[String: Any]] ?? []).compactMap { $0["text"] as? String }.joined(separator: "\n")
+            if !text.isEmpty { messages.append(.init(role: type, text: text)) }
+        }
+        return SidebarOrganizationInput.Context(recentMessages: messages,
+            currentIntent: messages.last(where: { $0.role == "user" })?.text,
+            compactionSummary: compaction, scope: scope, contextStatus: .observed)
+            .bounded(maximumCharacters: maximumCharacters, homeDirectory: homeDirectory)
+    }
+
+    private func readKimi(_ sid: String, maximumCharacters: Int) -> SidebarOrganizationInput.Context? {
+        guard safeSID(sid) else { return nil }
+        let root = homeDirectory.appendingPathComponent(".kimi-code")
+        guard let index = records(root.appendingPathComponent("session_index.jsonl")) else { return nil }
+        let matches = index.filter { $0["sessionId"] as? String == sid }
+        guard let entry = matches.last, entry["deleted"] as? Bool != true,
+              let path = entry["sessionDir"] as? String else { return nil }
+        let directory = URL(fileURLWithPath: path).standardizedFileURL
+        let sessions = root.appendingPathComponent("sessions").standardizedFileURL
+        guard directory.path.hasPrefix(sessions.path + "/"), directory.lastPathComponent == sid,
+              !containsSymbolicLink(directory),
+              let data = boundedData(directory.appendingPathComponent("state.json"), maximumBytes: 262_144),
+              let state = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return nil }
+        if let identity = state["id"] { guard identity as? String == sid else { return nil } }
+        let legacy = state["id"] == nil && state["version"] == nil
+        guard let agents = state["agents"] as? [String: Any], let main = agents["main"] as? [String: Any],
+              let homedir = main["homedir"] as? String,
+              main["parentAgentId"] == nil || main["parentAgentId"] is NSNull else { return nil }
+        let mainHome = URL(fileURLWithPath: homedir).standardizedFileURL
+        guard mainHome == directory.appendingPathComponent("agents/main").standardizedFileURL,
+              let rows = records(mainHome.appendingPathComponent("wire.jsonl")) else { return nil }
+        var messages: [SidebarOrganizationInput.Context.Message] = []
+        for row in rows {
+            guard let type = row["type"] as? String else { return nil }
+            if let agent = row["agentId"] as? String { if agent != "main" { continue } }
+            else if !legacy && type.hasPrefix("context.") { return nil }
+            guard type.hasPrefix("context.") else { continue }
+            if type == "context.clear" { messages.removeAll(); continue }
+            // Undo/splice/compaction need a separately verified replay model.
+            // Holding an unsupported mutation is safer than showing stale text.
+            guard type == "context.append_message" else { return nil }
+            guard let message = row["message"] as? [String: Any], let role = message["role"] as? String,
+                  ["user", "assistant"].contains(role) else { continue }
+            let text = (message["content"] as? [[String: Any]] ?? []).filter { $0["type"] as? String == "text" }
+                .compactMap { $0["text"] as? String }.joined(separator: "\n")
+            if !text.isEmpty { messages.append(.init(role: role, text: text)) }
+        }
+        return SidebarOrganizationInput.Context(recentMessages: messages,
+            currentIntent: state["lastPrompt"] as? String, scope: state["cwd"] as? String ?? entry["workDir"] as? String,
+            contextStatus: .observed).bounded(maximumCharacters: maximumCharacters, homeDirectory: homeDirectory)
     }
 
     private func readOpenCode(_ sid: String, maximumCharacters: Int) -> SidebarOrganizationInput.Context? {
