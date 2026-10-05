@@ -13312,7 +13312,13 @@ struct VerticalTabsSidebar: View, Equatable {
                     importance: CmuxSidebarWorkspaceImportance(rawValue: live?.importance.rawValue ?? "none") ?? .none,
                     isMuted: live?.isMuted ?? false,
                     customColorHex: live?.customColor,
-                    context: live?.workspaceContext.context
+                    context: live?.workspaceContext.context,
+                    serviceObservations: live.map { workspace in
+                        Array(workspace.sidebarOrderedPanelIds().compactMap { panelID in
+                            CmuxSidebarServiceObservation.browser(url: workspace.browserPanel(for: panelID)?.currentURL,
+                                surfaceId: panelID, observedAt: Date())
+                        }.prefix(32))
+                    }
                 )
             },
             workspaceGroups: groups.map { group in

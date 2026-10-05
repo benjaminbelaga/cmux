@@ -43,4 +43,7 @@ struct SidebarOrganizationOutput: Codable, Equatable, Sendable {
     let schemaVersion: Int
     let proposals: [Proposal]
     let diagnostics: [Diagnostic]
+    /// Optional for legacy tag engines. Folder plans require a fresh independent
+    /// readback from the canonical registry runner as well as this exact value.
+    var registryFingerprint: String? = nil
 }

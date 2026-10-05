@@ -133,6 +133,34 @@ final class WorkspaceContextModel {
         commit(next, previous: context, titleUndo: nil)
     }
 
+    /// Called only after the fixed native source resolver verifies a retained
+    /// request, Directory identity and fresh provider evidence. No tag or title
+    /// is accepted by attaching navigation metadata.
+    @discardableResult
+    func attachSourceReference(expectedRevision: UInt64, reference: CmuxSidebarSourceReference,
+                               requestID: String) throws -> UInt64 {
+        try verify(expectedRevision)
+        guard let fingerprint = reference.fingerprint else { throw MutationError.invalidPayload }
+        var next = context
+        let references = next.sourceReferences ?? []
+        let bindings = next.sourceRequestBindings ?? []
+        if let binding = bindings.first(where: { $0.requestId == requestID || $0.sourceReferenceFingerprint == fingerprint }) {
+            guard binding.requestId == requestID, binding.sourceReferenceFingerprint == fingerprint,
+                  binding.attachedRevision <= expectedRevision,
+                  references.contains(reference) else { throw MutationError.invalidPayload }
+            return expectedRevision
+        }
+        guard !references.contains(where: { $0.fingerprint == fingerprint }) else { throw MutationError.invalidPayload }
+        let binding = CmuxSidebarSourceRequestBinding(requestId: requestID,
+            sourceReferenceFingerprint: fingerprint, attachedRevision: expectedRevision + 1)
+        next.sourceReferences = references + [reference]
+        next.sourceRequestBindings = bindings + [binding]
+        guard CmuxSidebarSourceMetadata(sourceReferences: next.sourceReferences,
+            sourceRequestBindings: next.sourceRequestBindings).isStructurallyValid else { throw MutationError.invalidPayload }
+        commit(next, previous: context, titleUndo: nil)
+        return context.revision
+    }
+
     /// Computes acceptance before any native title write, without changing state.
     func prepareProposal(expectedRevision: UInt64, proposalID: UUID, tagIDs: [String], acceptTitle: Bool, acceptSummary: Bool) throws -> PreparedChange {
         try verify(expectedRevision)
