@@ -134,6 +134,14 @@ if ["roundtrip", "prepare", "analyze"].contains(args[2]) {
         check("Qwen exact SID active ancestry", texts(read("qwen", sid)) == ["Retained instruction", "Current instruction"])
         check("Qwen alias same exact store", texts(read("qwen_code", sid)) == ["Retained instruction", "Current instruction"])
         check("Qwen source unchanged", qwen.read_bytes() == original)
+        jsonl(qwen, rows[:3])
+        check("Qwen terminal rewind selects actual canonical leaf", texts(read("qwen", sid)) == ["Retained instruction"])
+        snapshot = "<state_snapshot>Confirmed compacted intent</state_snapshot>"
+        compression = dict(qrow(str(uuid.uuid4()), latest, "system"), subtype="chat_compression",
+                           systemPayload={"info": {"compressionStatus": 1}, "compressedHistory": [{"role": "user", "parts": [{"text": snapshot}]}]})
+        jsonl(qwen, [*rows, compression])
+        check("Qwen terminal compression snapshot observed", (read("qwen", sid) or {}).get("compactionSummary") == snapshot)
+        jsonl(qwen, rows)
         check("Qwen missing exact SID held", read("qwen", str(uuid.uuid4())) is None)
         jsonl(qwen, [*rows, qrow(str(uuid.uuid4()), "missing-parent", "user", "Unverified branch")])
         check("Qwen broken ancestry held", read("qwen", sid) is None)
