@@ -16,6 +16,8 @@ struct SidebarOrganizationPlanTests {
         var addNumber = 0
         var generatedInsteadOfChild = false
         var failAfterMutation = false
+        var reorderCreatedChildren = false
+        var restoreMode = "normal"
 
         init() {
             let ids = (0..<5).map { _ in UUID() }
@@ -45,6 +47,7 @@ struct SidebarOrganizationPlanTests {
             for index in state.workspaces.indices where children.contains(state.workspaces[index].id) {
                 state.workspaces[index].groupID = id
             }
+            if reorderCreatedChildren { state.order.swapAt(1, 3) }
             if failAfterMutation { throw Plan.Failure.mutationFailed }
             return id
         }
@@ -72,7 +75,12 @@ struct SidebarOrganizationPlanTests {
             state.groups.removeAll { $0.id == group }
         }
 
-        func restoreOrder(_ order: [UUID]) throws { calls.append("restore-order"); state.order = order }
+        func restoreOrder(_ order: [UUID]) throws {
+            calls.append("restore-order")
+            if restoreMode == "no-op" { return }
+            state.order = order
+            if restoreMode == "partial" { state.order.swapAt(1, 3) }
+        }
 
         func createPlan(_ indices: [Int] = [1, 2]) throws -> Plan {
             try .init(sourceFingerprint: source, before: state, assignments: indices.map {
@@ -243,6 +251,27 @@ struct SidebarOrganizationPlanTests {
         let receipt = try coordinator.apply(native.createPlan(), using: native)
         let forged = Coordinator.Receipt(plan: receipt.plan, after: receipt.after, createdGroups: ["unknown": UUID()])
         #expect(throws: Plan.Failure.outcomeDiffers) { try coordinator.rollback(forged, using: native) }
+        #expect(native.calls == ["create"])
+    }
+
+    @Test func rollbackCannotReportSuccessWhenNativeOrderRestorationDidNotApply() throws {
+        for mode in ["no-op", "partial"] {
+            let native = NativeFixture(), coordinator = Coordinator()
+            native.reorderCreatedChildren = true
+            let receipt = try coordinator.apply(native.createPlan(), using: native)
+            #expect(native.state.order != receipt.plan.before.order)
+            native.restoreMode = mode
+            #expect(throws: Plan.Failure.rollbackConflict) { try coordinator.rollback(receipt, using: native) }
+        }
+    }
+
+    @Test func aValidButUnissuedReceiptCannotAuthorizeRollback() throws {
+        let native = NativeFixture(), coordinator = Coordinator()
+        let receipt = try coordinator.apply(native.createPlan(), using: native)
+        let unissuedPlan = try Plan(sourceFingerprint: receipt.plan.sourceFingerprint,
+                                    before: receipt.plan.before, assignments: receipt.plan.assignments)
+        let forged = Coordinator.Receipt(plan: unissuedPlan, after: receipt.after, createdGroups: receipt.createdGroups)
+        #expect(throws: Plan.Failure.rollbackConflict) { try coordinator.rollback(forged, using: native) }
         #expect(native.calls == ["create"])
     }
 
