@@ -23,6 +23,8 @@ public struct CmuxSidebarWorkspace: Codable, Equatable, Identifiable, Sendable {
     public var customColorHex: String?
     /// Host-owned project context, shared only with the workspace-context scope.
     public var context: CmuxSidebarWorkspaceContext?
+    /// Services observed on current native surfaces, independent of agent identity.
+    public var serviceObservations: [CmuxSidebarServiceObservation]?
 
     public init(
         id: UUID,
@@ -41,7 +43,8 @@ public struct CmuxSidebarWorkspace: Codable, Equatable, Identifiable, Sendable {
         importance: CmuxSidebarWorkspaceImportance = .none,
         isMuted: Bool = false,
         customColorHex: String? = nil,
-        context: CmuxSidebarWorkspaceContext? = nil
+        context: CmuxSidebarWorkspaceContext? = nil,
+        serviceObservations: [CmuxSidebarServiceObservation]? = nil
     ) {
         self.id = id
         self.title = title
@@ -60,6 +63,7 @@ public struct CmuxSidebarWorkspace: Codable, Equatable, Identifiable, Sendable {
         self.isMuted = isMuted
         self.customColorHex = customColorHex
         self.context = context
+        self.serviceObservations = serviceObservations
     }
 
     public init(from decoder: Decoder) throws {
@@ -81,6 +85,11 @@ public struct CmuxSidebarWorkspace: Codable, Equatable, Identifiable, Sendable {
         isMuted = try container.decodeIfPresent(Bool.self, forKey: .isMuted) ?? false
         customColorHex = try container.decodeIfPresent(String.self, forKey: .customColorHex)
         context = try container.decodeIfPresent(CmuxSidebarWorkspaceContext.self, forKey: .context)
+        serviceObservations = try container.decodeIfPresent([CmuxSidebarServiceObservation].self, forKey: .serviceObservations)
+        guard (serviceObservations?.count ?? 0) <= 32,
+              (serviceObservations ?? []).allSatisfy({ observation in surfaces.contains { $0.id == observation.surfaceId } }) else {
+            throw DecodingError.dataCorrupted(.init(codingPath: decoder.codingPath, debugDescription: "Service observation exceeds its bound or refers to another surface"))
+        }
     }
 
     @_spi(CmuxHostTransport)
@@ -103,7 +112,8 @@ public struct CmuxSidebarWorkspace: Codable, Equatable, Identifiable, Sendable {
             importance: importance,
             isMuted: isMuted,
             customColorHex: customColorHex,
-            context: scopeSet.contains(.workspaceContext) ? context : nil
+            context: scopeSet.contains(.workspaceContext) ? context : nil,
+            serviceObservations: scopeSet.contains(.surfaceMetadata) ? serviceObservations : nil
         )
     }
 }

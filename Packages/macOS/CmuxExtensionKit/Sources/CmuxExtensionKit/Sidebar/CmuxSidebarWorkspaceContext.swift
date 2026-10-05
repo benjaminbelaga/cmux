@@ -18,6 +18,10 @@ public struct CmuxSidebarWorkspaceContext: Codable, Equatable, Sendable {
     public var analyzedProposal: CmuxSidebarWorkspaceContextProposal?
     /// Whether native one-step undo is available at this revision.
     public var canUndo: Bool
+    /// Bounded navigation references whose authenticated scope is rechecked on use.
+    public var sourceReferences: [CmuxSidebarSourceReference]?
+    /// Native-owned mapping to a retained provider request, never classifier input.
+    public var sourceRequestBindings: [CmuxSidebarSourceRequestBinding]?
 
     /// Creates a workspace-context value.
     /// - Parameters:
@@ -29,7 +33,7 @@ public struct CmuxSidebarWorkspaceContext: Codable, Equatable, Sendable {
     ///   - analyzedProposal: Latest retained analysis.
     ///   - canUndo: Whether the host retains a reversible change.
     ///   - rejectedSourceFingerprints: Explicitly rejected source material, empty for older hosts.
-    public init(revision: UInt64 = 0, tags: [CmuxSidebarContextTag] = [], aliases: [String] = [], summary: String? = nil, rejectedAutomaticTagIDs: [String] = [], analyzedProposal: CmuxSidebarWorkspaceContextProposal? = nil, canUndo: Bool = false, rejectedSourceFingerprints: [String] = []) {
+    public init(revision: UInt64 = 0, tags: [CmuxSidebarContextTag] = [], aliases: [String] = [], summary: String? = nil, rejectedAutomaticTagIDs: [String] = [], analyzedProposal: CmuxSidebarWorkspaceContextProposal? = nil, canUndo: Bool = false, rejectedSourceFingerprints: [String] = [], sourceReferences: [CmuxSidebarSourceReference]? = nil, sourceRequestBindings: [CmuxSidebarSourceRequestBinding]? = nil) {
         self.revision = revision
         self.tags = tags
         self.aliases = aliases
@@ -38,6 +42,8 @@ public struct CmuxSidebarWorkspaceContext: Codable, Equatable, Sendable {
         self.rejectedSourceFingerprints = rejectedSourceFingerprints
         self.analyzedProposal = analyzedProposal
         self.canUndo = canUndo
+        self.sourceReferences = sourceReferences
+        self.sourceRequestBindings = sourceRequestBindings
     }
 
     /// Decodes older native contexts without inventing proposal rejections.
@@ -53,7 +59,13 @@ public struct CmuxSidebarWorkspaceContext: Codable, Equatable, Sendable {
             rejectedAutomaticTagIDs: try values.decode([String].self, forKey: .rejectedAutomaticTagIDs),
             analyzedProposal: try values.decodeIfPresent(CmuxSidebarWorkspaceContextProposal.self, forKey: .analyzedProposal),
             canUndo: try values.decode(Bool.self, forKey: .canUndo),
-            rejectedSourceFingerprints: try values.decodeIfPresent([String].self, forKey: .rejectedSourceFingerprints) ?? []
+            rejectedSourceFingerprints: try values.decodeIfPresent([String].self, forKey: .rejectedSourceFingerprints) ?? [],
+            sourceReferences: try values.decodeIfPresent([CmuxSidebarSourceReference].self, forKey: .sourceReferences),
+            sourceRequestBindings: try values.decodeIfPresent([CmuxSidebarSourceRequestBinding].self, forKey: .sourceRequestBindings)
         )
+        guard CmuxSidebarSourceMetadata(sourceReferences: sourceReferences, sourceRequestBindings: sourceRequestBindings).isStructurallyValid,
+              (sourceRequestBindings ?? []).allSatisfy({ $0.attachedRevision <= revision }) else {
+            throw DecodingError.dataCorrupted(.init(codingPath: decoder.codingPath, debugDescription: "Invalid native source binding"))
+        }
     }
 }
