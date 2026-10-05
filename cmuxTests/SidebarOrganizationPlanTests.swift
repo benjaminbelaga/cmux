@@ -267,7 +267,7 @@ struct SidebarOrganizationPlanTests {
             let receipt = try coordinator.apply(native.createPlan(), using: native)
             #expect(native.state.order != receipt.plan.before.order)
             native.restoreMode = mode
-            #expect(throws: Plan.Failure.rollbackConflict) { try coordinator.rollback(receipt, using: native) }
+            #expect(throws: Coordinator.RecoveryRequired.self) { try coordinator.rollback(receipt, using: native) }
         }
     }
 
@@ -289,7 +289,13 @@ struct SidebarOrganizationPlanTests {
             _ = try coordinator.apply(plan, using: native)
             Issue.record("Expected the unsafe native result to be held")
         } catch {
-            #expect(String(reflecting: type(of: error)).contains("RecoveryRequired"))
+            let diagnostic = try #require(error as? Coordinator.RecoveryRequired)
+            #expect(diagnostic.phase == .applyCompensation)
+            #expect(diagnostic.planID == plan.id)
+            #expect(diagnostic.before == plan.before)
+            #expect(diagnostic.observed == native.state)
+            #expect(diagnostic.initialFailure?.description == "outcomeDiffers")
+            #expect(diagnostic.recoveryFailure.description == "rollbackConflict")
             #expect(native.state.workspaces.count == plan.before.workspaces.count)
             #expect(native.calls == ["create"])
         }

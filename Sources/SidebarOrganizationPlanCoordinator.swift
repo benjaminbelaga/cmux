@@ -27,6 +27,40 @@ final class SidebarOrganizationPlanCoordinator {
         let createdGroups: [String: UUID]
     }
 
+    struct FailureSummary: Equatable, Sendable {
+        let type: String
+        let description: String
+
+        init(_ error: any Error) {
+            type = String(String(reflecting: Swift.type(of: error)).prefix(256))
+            description = String(String(describing: error).prefix(512))
+        }
+    }
+
+    /// Diagnostic state only. It cannot authorize rollback or automatic retry.
+    struct RecoveryRequired: Error {
+        enum Phase: String, Sendable { case applyCompensation, rollback }
+        let phase: Phase
+        let planID: UUID
+        let before: Plan.Inventory
+        let observed: Plan.Inventory?
+        let observedUnavailable: FailureSummary?
+        let initialFailure: FailureSummary?
+        let recoveryFailure: FailureSummary
+    }
+
+    private func recoveryRequired(_ phase: RecoveryRequired.Phase, plan: Plan,
+                                  initial: (any Error)?, failed: any Error,
+                                  adapter: any Adapter) -> RecoveryRequired {
+        var observed: Plan.Inventory?
+        var unavailable: FailureSummary?
+        do { let value = try adapter.inventory(); try value.validate(); observed = value }
+        catch { unavailable = FailureSummary(error) }
+        return RecoveryRequired(phase: phase, planID: plan.id, before: plan.before,
+                                observed: observed, observedUnavailable: unavailable,
+                                initialFailure: initial.map(FailureSummary.init), recoveryFailure: FailureSummary(failed))
+    }
+
     private var receipts: [UUID: Receipt] = [:]
     private var receiptOrder: [UUID] = []
 
@@ -78,6 +112,8 @@ final class SidebarOrganizationPlanCoordinator {
             receiptOrder.append(plan.id)
             return receipt
         } catch {
+            let original = error
+            do {
             // A partial native result is inspected before undo. Unknown changes
             // fail closed; no generic reset can overwrite another operation.
             let current = try adapter.inventory()
@@ -94,7 +130,11 @@ final class SidebarOrganizationPlanCoordinator {
             }
             let partial = Receipt(plan: plan, after: current, createdGroups: created)
             try undo(partial, changed: Set(changed), using: adapter)
-            throw error
+            } catch {
+                throw recoveryRequired(.applyCompensation, plan: plan, initial: original,
+                                       failed: error, adapter: adapter)
+            }
+            throw original
         }
     }
 
@@ -107,7 +147,8 @@ final class SidebarOrganizationPlanCoordinator {
         guard scoped(current, receipt: receipt) == scoped(receipt.after, receipt: receipt) else {
             throw Plan.Failure.rollbackConflict
         }
-        try undo(receipt, changed: Set(receipt.plan.assignments.map(\.workspaceID)), using: adapter)
+        do { try undo(receipt, changed: Set(receipt.plan.assignments.map(\.workspaceID)), using: adapter) }
+        catch { throw recoveryRequired(.rollback, plan: receipt.plan, initial: nil, failed: error, adapter: adapter) }
         receipts[receipt.plan.id] = nil
         receiptOrder.removeAll { $0 == receipt.plan.id }
     }
