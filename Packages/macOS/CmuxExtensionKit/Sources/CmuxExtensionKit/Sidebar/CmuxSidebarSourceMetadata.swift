@@ -77,7 +77,7 @@ public struct CmuxSidebarSourceRequestBinding: Codable, Equatable, Sendable {
     }
 
     public var isStructurallyValid: Bool {
-        CmuxSidebarSourceReference.matches(requestId, "^CEO-[A-Za-z0-9][A-Za-z0-9_.-]{0,123}$")
+        CmuxSidebarSourceReference.matches(requestId, "^CEO-[0-9a-f]{32}$")
             && CmuxSidebarSourceReference.matches(sourceReferenceFingerprint, "^[0-9a-f]{64}$")
     }
 }
