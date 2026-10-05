@@ -27,12 +27,20 @@ actor SidebarOrganizationService: SidebarOrganizationAnalyzing {
         try Task.checkCancellation()
         var enriched = input
         for index in enriched.workspaces.indices {
+            try Task.checkCancellation()
             var remaining = 12_000
+            remaining -= enriched.workspaces[index].boundEnrichment(maximumCharacters: remaining,
+                homeDirectory: contextReader.homeDirectory)
             for session in enriched.workspaces[index].sessions.indices {
+                try Task.checkCancellation()
                 let current = enriched.workspaces[index].sessions[session]
-                let context = current.context ?? contextReader.read(current, maximumCharacters: min(6_000, remaining))
+                var context = current.context?.bounded(maximumCharacters: min(6_000, remaining),
+                    homeDirectory: contextReader.homeDirectory)
+                    ?? contextReader.context(for: current, maximumCharacters: min(6_000, remaining))
+                if remaining == 0 { context.contextStatus = .metadataOnly }
+                else if context.contextStatus == nil { context.contextStatus = context.characterCount > 0 ? .observed : .metadataOnly }
                 enriched.workspaces[index].sessions[session].context = context
-                remaining = max(0, remaining - (context?.recentMessages.reduce(0) { $0 + $1.text.count } ?? 0))
+                remaining = max(0, remaining - context.characterCount)
             }
         }
         return enriched
@@ -80,7 +88,8 @@ actor SidebarOrganizationService: SidebarOrganizationAnalyzing {
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .iso8601
         let result = try decoder.decode(SidebarOrganizationOutput.self, from: Data(contentsOf: outputURL))
-        guard result.schemaVersion == 1, result.proposals.count <= input.workspaces.count,
+        guard result.registryFingerprint == nil || result.registryFingerprint?.range(of: "^[0-9a-f]{64}$", options: .regularExpression) != nil,
+              result.schemaVersion == 1, result.proposals.count <= input.workspaces.count,
               Set(result.proposals.map(\.workspaceId)).count == result.proposals.count,
               result.proposals.allSatisfy({ proposal in
                   guard let workspace = input.workspaces.first(where: { $0.id == proposal.workspaceId }) else { return false }
