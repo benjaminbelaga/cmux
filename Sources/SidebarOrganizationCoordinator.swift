@@ -46,6 +46,13 @@ final class SidebarOrganizationCoordinator {
     func analyze(tabManager: TabManager, workspaceIDs: [UUID]? = nil,
                  exportID: UUID? = nil, review: Data? = nil,
                  authorized: @MainActor () -> Bool = { true }) async -> CmuxSidebarActionResult {
+        await analyze(tabManager: tabManager, workspaceIDs: workspaceIDs,
+            exportID: exportID, review: review, authorized: authorized, classificationID: nil)
+    }
+
+    private func analyze(tabManager: TabManager, workspaceIDs: [UUID]?,
+                         exportID: UUID?, review: Data?, authorized: @MainActor () -> Bool,
+                         classificationID: UUID?) async -> CmuxSidebarActionResult {
         guard authorized(), !Task.isCancelled else { return .cancelled }
         let input: SidebarOrganizationInput
         let nativeInventory: SidebarOrganizationInput
@@ -93,7 +100,7 @@ final class SidebarOrganizationCoordinator {
             if let fingerprint = output.registryFingerprint,
                let inventory = try? SidebarOrganizationNativeAdapter(manager: tabManager,
                     registryFingerprint: fingerprint).inventory() {
-                planIssuer.retain(output: output, input: input, inventory: inventory)
+                planIssuer.retain(output: output, input: input, inventory: inventory, classificationID: classificationID)
             }
             if let exportID { exports.removeValue(forKey: exportID) }
             return .accepted
@@ -105,9 +112,12 @@ final class SidebarOrganizationCoordinator {
     /// retained identity and performs an independent fresh registry readback.
     func preparePlan(tabManager: TabManager, workspaceIDs: [UUID]? = nil,
                      authorized: @MainActor () -> Bool) async throws -> SidebarOrganizationPlan {
-        let result = await analyze(tabManager: tabManager, workspaceIDs: workspaceIDs, authorized: authorized)
+        let classificationID = UUID()
+        let result = await analyze(tabManager: tabManager, workspaceIDs: workspaceIDs,
+            exportID: nil, review: nil, authorized: authorized, classificationID: classificationID)
         guard result.accepted else { throw SidebarOrganizationPlanIssuer.Failure.unavailable }
-        return try await planIssuer.prepare(manager: tabManager, authorized: authorized)
+        return try await planIssuer.prepare(manager: tabManager, authorized: authorized,
+            classificationID: classificationID)
     }
 
     func applyPlan(_ id: UUID, tabManager: TabManager,

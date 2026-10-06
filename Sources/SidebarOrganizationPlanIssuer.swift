@@ -11,6 +11,7 @@ final class SidebarOrganizationPlanIssuer {
         let placement: Ledger.RecoveryRequired
     }
     private struct Batch {
+        let classificationID: UUID
         let output: SidebarOrganizationOutput
         let input: SidebarOrganizationInput
         let inventory: Plan.Inventory
@@ -36,20 +37,23 @@ final class SidebarOrganizationPlanIssuer {
     init(registry: SidebarOrganizationRegistryReader?) { self.registry = registry }
 
     func retain(output: SidebarOrganizationOutput, input: SidebarOrganizationInput,
-                inventory: Plan.Inventory) {
+                inventory: Plan.Inventory, classificationID: UUID? = nil) {
         guard registry != nil, let fingerprint = output.registryFingerprint,
               Self.canonical(fingerprint) else { batch = nil; return }
-        batch = Batch(output: output, input: input.metadata, inventory: inventory)
+        batch = Batch(classificationID: classificationID ?? input.id,
+            output: output, input: input.metadata, inventory: inventory)
     }
 
-    func prepare(manager: TabManager, authorized: @MainActor () -> Bool) async throws -> Plan {
+    func prepare(manager: TabManager, authorized: @MainActor () -> Bool,
+                 classificationID: UUID? = nil) async throws -> Plan {
         guard !recoverySaturated, let registry, let retained = batch,
               let fingerprint = retained.output.registryFingerprint, authorized() else { throw Failure.unavailable }
+        guard classificationID == nil || classificationID == retained.classificationID else { throw Failure.stale }
         let adapter = SidebarOrganizationNativeAdapter(manager: manager, registryFingerprint: fingerprint)
         guard try adapter.inventory() == retained.inventory else { throw Failure.stale }
         let currentFingerprint = try await registry.read()
         try Task.checkCancellation()
-        guard authorized(), currentFingerprint == fingerprint,
+        guard authorized(), batch?.classificationID == retained.classificationID, currentFingerprint == fingerprint,
               try adapter.inventory() == retained.inventory else { throw Failure.stale }
         var assignments: [Plan.Assignment] = []
         for row in retained.output.proposals {
