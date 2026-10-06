@@ -76,6 +76,8 @@ public enum ControlCommandExecutionPolicy: Sendable, Equatable {
     static let socketWorkerMethods: Set<String> = Set([
         "system.ping",
         "system.capabilities",
+        // Sidebar recovery is handled by the worker switch with one main-actor hop.
+        "extension.sidebar.status", "extension.sidebar.reconnect",
         // Agent session recovery reads the journal (SQLite), the hook stores
         // and transcripts; only the open-session scan and workspace creation
         // hop to the main actor.
