@@ -12,8 +12,16 @@ import CmuxExtensionKit
   let tag=CmuxSidebarContextTag(id:"topic:hr",label:"HR",dimension:"topic",origin:.manual,source:"user")
   try model.mutate(expectedRevision:0,mutation:.setManualTag(tag))
   let ref=CmuxSidebarSourceReference(accountRef:"MBX-"+String(repeating:"a",count:64),directoryUserId:"123456789",resourceId:"GTK-"+String(repeating:"b",count:64),messageId:"message123",evidenceFingerprint:String(repeating:"c",count:64))
+  var strict=ref;strict.evidenceFingerprint += "\n"
+  var strictResource=ref;strictResource.resourceId += "\n"
+  var strictUID=ref;strictUID.directoryUserId += "\n"
   let request="CEO-"+String(repeating:"a",count:32)
   var r:[String:Bool]=[:]
+  for (name,invalid) in [("fullFingerprintMatch",strict),("fullResourceMatch",strictResource),("fullDirectoryUIDMatch",strictUID)] {
+   let untouched=WorkspaceContextModel();var rejected=false
+   do {_ = try untouched.attachSourceReference(expectedRevision:0,reference:invalid,requestID:request)}catch{rejected=true}
+   r[name] = !invalid.isStructurallyValid && rejected && untouched.context.revision==0 && untouched.context.sourceReferences==nil
+  }
   let revision=try model.attachSourceReference(expectedRevision:1,reference:ref,requestID:request)
   r["nativePostAttachmentRevision"] = revision == 2 && model.context.sourceRequestBindings?.first?.attachedRevision == revision
   r["manualTagPreserved"] = model.context.tags == [tag]
@@ -57,5 +65,5 @@ def main():
   values=json.loads(subprocess.run([str(binary)],check=True,capture_output=True,text=True,timeout=15).stdout)
   for name,ok in values.items():print(('PASS ' if ok else 'FAIL ')+name)
   print(json.dumps({'passed':sum(values.values()),'failed':sum(not v for v in values.values())}))
-  return 0 if len(values)==12 and all(values.values()) else 1
+  return 0 if len(values)==15 and all(values.values()) else 1
 if __name__=='__main__':raise SystemExit(main())
