@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """Synthetic negative proofs for canonical pair attestation; no app launches."""
 import importlib.util
-import getpass
 import json
 from pathlib import Path
 import plistlib
+import pwd
+import os
 import subprocess
 import shutil
 import tempfile
@@ -311,7 +312,7 @@ class SDKMaterializationTests(unittest.TestCase):
         workspace = self.project_path.parent / "project.xcworkspace/contents.xcworkspacedata"
         workspace.parent.mkdir()
         workspace.write_text('<Workspace version="1.0"><FileRef location="self:"/></Workspace>')
-        self.user_scheme = self.project_path.parent / ("xcuserdata/" + getpass.getuser() + ".xcuserdatad/xcschemes/xcschememanagement.plist")
+        self.user_scheme = self.project_path.parent / ("xcuserdata/" + pwd.getpwuid(os.getuid()).pw_name + ".xcuserdatad/xcschemes/xcschememanagement.plist")
         self.user_scheme.parent.mkdir(parents=True)
         self.user_scheme.write_bytes(plistlib.dumps({"SchemeUserState": {}}))
         self.info_path = self.materialized / "Derived/InfoPlists/CmuxExtensionKit-Info.plist"
