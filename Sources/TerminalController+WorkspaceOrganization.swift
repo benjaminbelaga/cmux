@@ -8,6 +8,9 @@ extension TerminalController {
     func workspaceOrganizationResponse(_ request: ControlRequest) async -> String {
         let params = request.params.mapValues(\.foundationObject)
         let id = request.id?.foundationObject
+        guard let socketAuthorization = SocketCommandAuthorization.current, socketAuthorization.isValid else {
+            return v2Error(id: id, code: "access_denied", message: "Socket authorization is no longer current")
+        }
         guard let manager = v2ResolveTabManager(params: params) else {
             return v2Error(id: id, code: "not_found", message: String(localized: "sidebar.extensions.context.invalidPayload", defaultValue: "The context request is invalid or exceeds its limits."))
         }
@@ -28,7 +31,7 @@ extension TerminalController {
                 let revision = try await manager.sidebarSourceReferenceCoordinator.attach(
                     manager: manager, workspaceID: packet.workspaceID, expectedRevision: packet.expectedRevision,
                     requestID: packet.requestID, reference: packet.sourceReference, authorized: {
-                        !Task.isCancelled && manager.windowId == windowID
+                        socketAuthorization.isValid && manager.windowId == windowID
                             && AppDelegate.shared?.tabManagerFor(windowId: windowID) === manager
                             && AppDelegate.shared?.tabManagerFor(tabId: packet.workspaceID) === manager
                             && self.v2ResolveTabManager(params: params) === manager
@@ -62,7 +65,11 @@ extension TerminalController {
         } else { workspaceIDs = nil }
         if request.method == "workspace.context.export" {
             do {
-                let data = try await manager.sidebarOrganizationCoordinator.export(tabManager: manager, workspaceIDs: workspaceIDs)
+                let data = try await manager.sidebarOrganizationCoordinator.export(tabManager: manager, workspaceIDs: workspaceIDs,
+                    authorized: {
+                        socketAuthorization.isValid && self.v2ResolveTabManager(params: params) === manager
+                            && manager.windowId.flatMap { AppDelegate.shared?.tabManagerFor(windowId: $0) } === manager
+                    })
                 let result = try JSONSerialization.jsonObject(with: data) as? [String: Any] ?? [:]
                 return v2Ok(id: id, result: result)
             } catch { return v2Error(id: id, code: "classification_unavailable", message: String(localized: "sidebar.extensions.organization.unavailable", defaultValue: "Analysis is unavailable. Check the local classification engine and Python 3.11, then retry.")) }
@@ -75,7 +82,7 @@ extension TerminalController {
         guard let windowID = manager.windowId else { return v2Error(id: id, code: "not_found", message: "Window is unavailable") }
         let result = await manager.sidebarOrganizationCoordinator.analyze(tabManager: manager,
             workspaceIDs: workspaceIDs, exportID: exportID, review: data, authorized: {
-                !Task.isCancelled && manager.windowId == windowID
+                socketAuthorization.isValid && manager.windowId == windowID
                     && AppDelegate.shared?.tabManagerFor(windowId: windowID) === manager
                     && self.v2ResolveTabManager(params: params) === manager
             })
@@ -87,13 +94,16 @@ extension TerminalController {
     private func workspaceOrganizationPlanResponse(_ request: ControlRequest, manager: TabManager) async -> String {
         let params = request.params.mapValues(\.foundationObject)
         let id = request.id?.foundationObject
+        guard let socketAuthorization = SocketCommandAuthorization.current, socketAuthorization.isValid else {
+            return v2Error(id: id, code: "access_denied", message: "Socket authorization is no longer current")
+        }
         guard let rawWindow = params["window_id"] as? String, let windowID = UUID(uuidString: rawWindow),
               manager.windowId == windowID,
               AppDelegate.shared?.tabManagerFor(windowId: windowID) === manager else {
             return v2Error(id: id, code: "invalid_params", message: "An exact current window is required")
         }
         let authorized: @MainActor () -> Bool = {
-            !Task.isCancelled && manager.windowId == windowID
+            socketAuthorization.isValid && manager.windowId == windowID
                 && AppDelegate.shared?.tabManagerFor(windowId: windowID) === manager
                 && self.v2ResolveTabManager(params: params) === manager
         }

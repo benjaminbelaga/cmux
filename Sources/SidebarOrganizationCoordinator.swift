@@ -22,10 +22,13 @@ final class SidebarOrganizationCoordinator {
         planIssuer = SidebarOrganizationPlanIssuer(registry: registry)
     }
 
-    func export(tabManager: TabManager, workspaceIDs: [UUID]? = nil) async throws -> Data {
+    func export(tabManager: TabManager, workspaceIDs: [UUID]? = nil,
+                authorized: @MainActor () -> Bool = { true }) async throws -> Data {
+        guard authorized(), !Task.isCancelled else { throw CancellationError() }
         let inventory = SidebarOrganizationInventoryBuilder(now: now).make(tabManager: tabManager, workspaceIDs: workspaceIDs)
         let input = try await service.prepare(inventory)
         try Task.checkCancellation()
+        guard authorized() else { throw CancellationError() }
         let current = SidebarOrganizationInventoryBuilder(now: now).make(tabManager: tabManager, workspaceIDs: workspaceIDs)
         guard input.isValid, current.windowID == inventory.windowID,
               input.metadata.workspaces == inventory.metadata.workspaces,

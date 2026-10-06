@@ -2335,7 +2335,8 @@ class TerminalController {
                 await processSocketLineAsync(
                     trimmed,
                     passwordAuthorization: passwordAuthorization,
-                    rateLimiter: rateLimiter
+                    rateLimiter: rateLimiter,
+                    authorizationGeneration: authorizationGeneration
                 )
             }
             passwordAuthorization = result.passwordAuthorization

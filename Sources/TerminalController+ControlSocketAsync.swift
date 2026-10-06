@@ -12,7 +12,8 @@ extension TerminalController {
     nonisolated func processSocketLineAsync(
         _ command: String,
         passwordAuthorization: SocketPasswordAuthorization,
-        rateLimiter: ControlClientRateLimiter
+        rateLimiter: ControlClientRateLimiter,
+        authorizationGeneration: UInt64? = nil
     ) async -> (response: String?, passwordAuthorization: SocketPasswordAuthorization) {
         var nextPasswordAuthorization = passwordAuthorization
         if let response = authResponseIfNeeded(
@@ -33,7 +34,16 @@ extension TerminalController {
             )
         }
 
-        let response = await processCommandUsingSocketExecutionPolicyAsync(command)
+        let passwordSnapshot = nextPasswordAuthorization
+        let authorization = authorizationGeneration.map { generation in
+            SocketCommandAuthorization(isCurrent: {
+                self.socketServer.isConnectionAuthorizationCurrent(generation,
+                    passwordAuthorization: passwordSnapshot)
+            })
+        }
+        let response = await SocketCommandAuthorization.$current.withValue(authorization) {
+            await processCommandUsingSocketExecutionPolicyAsync(command)
+        }
         return (response, nextPasswordAuthorization)
     }
 
