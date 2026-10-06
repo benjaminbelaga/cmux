@@ -160,7 +160,7 @@ actor Probe:CommandRunning {
   let(waitManager,waitRow,waitProbe,waitIssuer)=try fixture(classificationTicket:ticketA)
   await waitProbe.setHook {await MainActor.run {
    let retained=waitRow.workspaceContext.context.analyzedProposal!
-   let replacement=SidebarOrganizationOutput.Proposal(workspaceId:waitRow.id.uuidString,expectedRevision:waitRow.workspaceContext.context.revision,id:retained.id,suggestedTags:retained.suggestedTags,suggestedTitle:nil,summary:nil,source:retained.source,sourceFingerprint:retained.sourceFingerprint,conversationIDs:retained.conversationIDs,analyzedAt:retained.analyzedAt,evidence:[.init(kind:"registered-repository-directory",reference:"registered",sessionId:"native-session")])
+   let replacement=SidebarOrganizationOutput.Proposal(workspaceId:waitRow.id.uuidString,expectedRevision:waitRow.workspaceContext.context.revision,id:retained.id,suggestedTags:[.init(id:"repository:registered",label:"Registered",dimension:"repository",origin:.automatic,source:"repo-classification:registered")],suggestedTitle:nil,summary:nil,source:retained.source,sourceFingerprint:retained.sourceFingerprint,conversationIDs:retained.conversationIDs,analyzedAt:retained.analyzedAt,evidence:[.init(kind:"registered-repository-directory",reference:"registered",sessionId:"native-session")])
    let input=SidebarOrganizationInventoryBuilder().make(tabManager:waitManager)
    let inventory=try! SidebarOrganizationNativeAdapter(manager:waitManager,registryFingerprint:String(repeating:"a",count:64)).inventory()
    waitIssuer.retain(output:.init(schemaVersion:1,proposals:[replacement],diagnostics:[],registryFingerprint:String(repeating:"a",count:64)),input:input,inventory:inventory,classificationID:ticketB)
