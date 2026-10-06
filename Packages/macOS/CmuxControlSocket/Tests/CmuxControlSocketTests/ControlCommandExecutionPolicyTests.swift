@@ -3,6 +3,24 @@ import Testing
 
 @Suite("ControlCommandExecutionPolicy")
 struct ControlCommandExecutionPolicyTests {
+    @Test(arguments: ["extension.sidebar.status", "extension.sidebar.reconnect"])
+    func sidebarRecoveryRunsOnTheWorkerAndIsNotMainThreadCallable(method: String) {
+        // These local-only handlers exist in the worker dispatcher and make
+        // one main-actor hop; routing them inline would bypass that handler.
+        let policy = ControlCommandExecutionPolicy(forMethod: method)
+        #expect(policy == .socketWorker(mainThreadCallable: false))
+        #expect(policy.runsOnSocketWorker)
+    }
+
+    @Test func sidebarRecoveryDoesNotGrantANamespaceOrV1WorkerLane() {
+        for method in ["extension.sidebar.unknown", "extension.sidebar.status.extra"] {
+            #expect(ControlCommandExecutionPolicy(forMethod: method) == .mainActor, "\(method)")
+        }
+        for command in ["extension.sidebar.status", "extension.sidebar.reconnect"] {
+            #expect(ControlCommandExecutionPolicy(forV1Command: command) == .mainActor, "\(command)")
+        }
+    }
+
     @Test func vmPrefixedMethodsRunOnTheSocketWorker() {
         #expect(ControlCommandExecutionPolicy(forMethod: "vm.create") == .socketWorker(mainThreadCallable: false))
         #expect(ControlCommandExecutionPolicy(forMethod: "vm.anything.else").runsOnSocketWorker)
