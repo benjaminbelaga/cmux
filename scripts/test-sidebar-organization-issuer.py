@@ -31,18 +31,19 @@ import CmuxFoundation
  var windowId:UUID?=UUID();var tabs:[Workspace]=[];var workspaceGroups:[Group]=[]
  var selectedTabId:UUID?;var sidebarSelectedWorkspaceIds:Set<UUID>=[]
  var writes=0;var createdWithExistingChildren=false;var failAfterCreate=false;var inventoryUnavailable=false
+ var loseCreateReturn=false;var failOrderReturn=false
  enum Reorder {case success,failure}
  func createWorkspaceGroup(name:String,childWorkspaceIds:[UUID],selectAnchor:Bool,collapseSidebarSelection:Bool,externalID:String)->UUID? {
   writes+=1;createdWithExistingChildren = !selectAnchor && !collapseSidebarSelection && !childWorkspaceIds.isEmpty
   let id=UUID();workspaceGroups.append(.init(id:id,name:name,externalID:externalID,liveAnchorWorkspaceId:childWorkspaceIds.first))
   for w in tabs where childWorkspaceIds.contains(w.id){w.groupId=id;w.groupPlacement=nil}
   if failAfterCreate{inventoryUnavailable=true}
-  return id
+  return loseCreateReturn ? nil : id
  }
  func addWorkspaceToGroup(workspaceId:UUID,groupId:UUID){writes+=1;let w=tabs.first{$0.id==workspaceId}!;w.groupId=groupId;w.groupPlacement=nil}
- func removeWorkspaceFromGroup(workspaceId:UUID){writes+=1;let w=tabs.first{$0.id==workspaceId}!;w.groupId=nil;w.groupPlacement=nil}
+ func removeWorkspaceFromGroup(workspaceId:UUID){writes+=1;let w=tabs.first{$0.id==workspaceId}!;let group=w.groupId;w.groupId=nil;w.groupPlacement=nil;if let index=workspaceGroups.firstIndex(where:{$0.id==group}){workspaceGroups[index].liveAnchorWorkspaceId=tabs.first(where:{$0.groupId==group})?.id}}
  func ungroupWorkspaceGroup(groupId:UUID,removeGeneratedAnchor:Bool)->Bool{writes+=1;workspaceGroups.removeAll{$0.id==groupId};for w in tabs where w.groupId==groupId{w.groupId=nil;w.groupPlacement=nil};return !removeGeneratedAnchor}
- func reorderWorkspaces(orderedWorkspaceIds:[UUID])->Reorder {writes+=1;tabs=orderedWorkspaceIds.compactMap{id in tabs.first{$0.id==id}};return .success}
+ func reorderWorkspaces(orderedWorkspaceIds:[UUID])->Reorder {writes+=1;tabs=orderedWorkspaceIds.compactMap{id in tabs.first{$0.id==id}};return failOrderReturn ? .failure : .success}
 }
 @MainActor enum SidebarWorkspaceRenderItem {
  static func effectiveGroupIdByWorkspaceId(tabs:[Workspace],groupsById:[UUID:Group])->[UUID:UUID?] {
@@ -76,7 +77,7 @@ actor Probe:CommandRunning {
   typealias P=SidebarOrganizationPlan
   var checks:[String:Bool]=[:]
   func rejects(_ action:() async throws -> Void) async -> Bool {do{try await action();return false}catch{return true}}
-  func fixture(grouped:Bool=false,semantic:Bool=false) throws -> (TabManager,Workspace,Probe,SidebarOrganizationPlanIssuer) {
+  func fixture(grouped:Bool=false,semantic:Bool=false,manualRepository:Bool=false,rejectedRepository:Bool=false) throws -> (TabManager,Workspace,Probe,SidebarOrganizationPlanIssuer) {
    let m=TabManager(),w=Workspace(),p=Probe();m.tabs=[w];m.selectedTabId=w.id;m.sidebarSelectedWorkspaceIds=[w.id]
    w.isPinned=true
    let manual=CmuxSidebarContextTag(id:"topic:hr",label:"HR",dimension:"topic",origin:.manual,source:"user")
@@ -84,6 +85,12 @@ actor Probe:CommandRunning {
    let tag=CmuxSidebarContextTag(id:"repository:registered",label:"Registered",dimension:"repository",origin:.automatic,source:semantic ? "semantic-review" : "repo-classification:registered")
    let row=SidebarOrganizationOutput.Proposal(workspaceId:w.id.uuidString,expectedRevision:1,id:UUID(),suggestedTags:[tag],suggestedTitle:nil,summary:nil,source:"session-organization",sourceFingerprint:String(repeating:"b",count:64),conversationIDs:["native-session"],analyzedAt:Date(),evidence:[.init(kind:"registered-repository-directory",reference:"registered",sessionId:"native-session")])
    try w.workspaceContext.storeProposal(expectedRevision:1,proposal:row.contextProposal)
+   if manualRepository {
+    try w.workspaceContext.mutate(expectedRevision:2,mutation:.setManualTag(.init(id:"repository:other",label:"Other",dimension:"repository",origin:.manual,source:"user")))
+   }
+   if rejectedRepository {
+    var restored=w.workspaceContext.persisted;restored.context.rejectedAutomaticTagIDs=["repository:registered"];w.workspaceContext.restore(restored)
+   }
    if grouped{let g=UUID();m.workspaceGroups=[.init(id:g,name:"Manual HR",liveAnchorWorkspaceId:w.id)];w.groupId=g}
    let reader=SidebarOrganizationRegistryReader(engineURL:URL(fileURLWithPath:"/immutable/engine.py"),rulesURL:URL(fileURLWithPath:"/current/rules.yaml"),commands:p,pythonCandidates:["/python"])
    let issuer=SidebarOrganizationPlanIssuer(registry:reader)
@@ -133,6 +140,17 @@ actor Probe:CommandRunning {
   let partialWrites=partial.writes
   checks["post-write compensation failure retains actual core diagnosis"] = diagnosed && partial.tabs[0].groupId != nil
   checks["partial outcome grants no automatic retry"] = await rejects{_ = try await partialIssuer.apply(partialPlan.id,manager:partial,authorized:{true})} && partial.writes == partialWrites
+  let(overlap,_,_,overlapIssuer)=try fixture();let first=try await overlapIssuer.prepare(manager:overlap,authorized:{true});let second=try await overlapIssuer.prepare(manager:overlap,authorized:{true})
+  overlap.loseCreateReturn=true;overlap.failOrderReturn=true
+  var restoredButHeld=false
+  do {_ = try await overlapIssuer.apply(first.id,manager:overlap,authorized:{true})}
+  catch let error as SidebarOrganizationPlanCoordinator.RecoveryRequired {restoredButHeld = error.observed == first.before}
+  overlap.loseCreateReturn=false;overlap.failOrderReturn=false;let overlapWrites=overlap.writes
+  checks["overlapping pending plan cannot write a recovery-held workspace"] = await rejects{_ = try await overlapIssuer.apply(second.id,manager:overlap,authorized:{true})} && restoredButHeld && overlap.writes == overlapWrites
+  let(manualDimension,manualRow,_,manualDimensionIssuer)=try fixture(manualRepository:true)
+  checks["current manual dimension fences retained registered suggestion"] = await rejects{_ = try await manualDimensionIssuer.prepare(manager:manualDimension,authorized:{true})} && manualDimension.writes == 0 && manualRow.workspaceContext.context.tags.contains{$0.id=="repository:other" && $0.origin == .manual}
+  let(rejectedTag,_,_,rejectedTagIssuer)=try fixture(rejectedRepository:true)
+  checks["current rejected tag fences restored retained suggestion"] = await rejects{_ = try await rejectedTagIssuer.prepare(manager:rejectedTag,authorized:{true})} && rejectedTag.writes == 0
   _ = probe
   print(String(decoding:try JSONSerialization.data(withJSONObject:checks,options:.sortedKeys),as:UTF8.self))
  }
@@ -162,7 +180,7 @@ def main():
         for name, passed in checks.items():
             print(('PASS ' if passed else 'FAIL ')+name)
         print(json.dumps({'passed': sum(checks.values()), 'failed': sum(not value for value in checks.values())}))
-        return 0 if len(checks) == 20 and all(checks.values()) else 1
+        return 0 if len(checks) == 23 and all(checks.values()) else 1
 
 
 if __name__ == '__main__':
