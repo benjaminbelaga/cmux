@@ -304,8 +304,14 @@ class SDKMaterializationTests(unittest.TestCase):
             objects["F" + str(index)] = {"isa": "PBXFileReference", "sourceTree": "<group>", "path": name, "lastKnownFileType": "sourcecode.swift"}
             objects["B" + str(index)] = {"isa": "PBXBuildFile", "fileRef": "F" + str(index)}
         for key, name in [("PD", "Debug"), ("PR", "Release"), ("TD", "Debug"), ("TR", "Release")]:
-            settings = {"OTHER_SWIFT_FLAGS": ["$(inherited)", "-package-name", "CmuxExtensionKit"]} if key.startswith("P") else {
-                "OTHER_SWIFT_FLAGS": "$(inherited)", "INFOPLIST_FILE": "Derived/InfoPlists/CmuxExtensionKit-Info.plist", "MACH_O_TYPE": "staticlib", "PRODUCT_NAME": "CmuxExtensionKit"}
+            settings = {"OTHER_SWIFT_FLAGS": ["$(inherited)", "-package-name", "CmuxExtensionKit"],
+                "SWIFT_ACTIVE_COMPILATION_CONDITIONS": ["$(inherited)", "SWIFT_PACKAGE"]} if key.startswith("P") else {
+                "OTHER_SWIFT_FLAGS": "$(inherited)", "INFOPLIST_FILE": "Derived/InfoPlists/CmuxExtensionKit-Info.plist", "MACH_O_TYPE": "staticlib", "PRODUCT_NAME": "CmuxExtensionKit",
+                "CURRENT_PROJECT_VERSION": "1", "VERSION_INFO_PREFIX": "", "VERSIONING_SYSTEM": "apple-generic",
+                "FRAMEWORK_VERSION": "A", "DYLIB_COMPATIBILITY_VERSION": "1", "DYLIB_CURRENT_VERSION": "1",
+                "MACOSX_DEPLOYMENT_TARGET": "14.0", "SWIFT_COMPILATION_MODE": "singlefile" if name == "Debug" else "wholemodule",
+                "SWIFT_OPTIMIZATION_LEVEL": "-Onone" if name == "Debug" else "-O"}
+            if key == "TD": settings["SWIFT_ACTIVE_COMPILATION_CONDITIONS"] = ["$(inherited)", "DEBUG"]
             objects[key] = {"isa": "XCBuildConfiguration", "name": name, "buildSettings": settings}
         self.project = {"archiveVersion": "1", "objectVersion": "55", "classes": {}, "objects": objects, "rootObject": "P"}
         self.persist_project()
@@ -420,6 +426,86 @@ class SDKMaterializationTests(unittest.TestCase):
     def test_partial_generated_set_is_refused(self):
         self.info_path.unlink()
         with self.assertRaises(producer.PairVerificationError): self.proof()
+
+    def reject_setting_mutations(self, key, value):
+        for identifier in ["PD", "PR", "TD", "TR"]:
+            with self.subTest(configuration=identifier, setting=key):
+                settings = self.project["objects"][identifier]["buildSettings"]
+                before = dict(settings)
+                try:
+                    settings[key] = value
+                    self.persist_project()
+                    with self.assertRaises(producer.PairVerificationError): self.proof()
+                finally:
+                    settings.clear()
+                    settings.update(before)
+
+    def test_project_version_codegen_value_is_closed(self):
+        self.reject_setting_mutations("CURRENT_PROJECT_VERSION", "unexpected-version")
+
+    def test_version_symbol_prefix_is_closed(self):
+        self.reject_setting_mutations("VERSION_INFO_PREFIX", "unexpected-prefix")
+
+    def test_version_codegen_system_is_closed(self):
+        self.reject_setting_mutations("VERSIONING_SYSTEM", "unexpected-system")
+
+    def test_deployment_target_is_closed(self):
+        self.reject_setting_mutations("MACOSX_DEPLOYMENT_TARGET", "unexpected-target")
+
+    def test_release_cannot_acquire_debug_compilation_condition(self):
+        self.project["objects"]["TR"]["buildSettings"]["SWIFT_ACTIVE_COMPILATION_CONDITIONS"] = ["$(inherited)", "DEBUG"]
+        self.persist_project()
+        with self.assertRaises(producer.PairVerificationError): self.proof()
+
+    def test_framework_version_inputs_are_closed(self):
+        for key in ["FRAMEWORK_VERSION", "DYLIB_COMPATIBILITY_VERSION", "DYLIB_CURRENT_VERSION"]:
+            self.reject_setting_mutations(key, "unexpected-version")
+
+    def test_target_codegen_and_deployment_settings_are_required(self):
+        for identifier in ["TD", "TR"]:
+            for key in ["CURRENT_PROJECT_VERSION", "VERSION_INFO_PREFIX", "VERSIONING_SYSTEM", "FRAMEWORK_VERSION",
+                    "DYLIB_COMPATIBILITY_VERSION", "DYLIB_CURRENT_VERSION", "MACOSX_DEPLOYMENT_TARGET"]:
+                with self.subTest(configuration=identifier, setting=key):
+                    settings = self.project["objects"][identifier]["buildSettings"]
+                    previous = settings.pop(key)
+                    try:
+                        self.persist_project()
+                        with self.assertRaises(producer.PairVerificationError): self.proof()
+                    finally:
+                        settings[key] = previous
+
+    def test_required_package_and_debug_conditions_cannot_disappear(self):
+        for identifier in ["PD", "PR", "TD"]:
+            with self.subTest(configuration=identifier):
+                settings = self.project["objects"][identifier]["buildSettings"]
+                previous = settings.pop("SWIFT_ACTIVE_COMPILATION_CONDITIONS")
+                try:
+                    self.persist_project()
+                    with self.assertRaises(producer.PairVerificationError): self.proof()
+                finally:
+                    settings["SWIFT_ACTIVE_COMPILATION_CONDITIONS"] = previous
+
+    def test_configuration_specific_compilation_mode_and_optimization_are_closed(self):
+        for identifier, mode, optimization in [("TD", "wholemodule", "-O"), ("TR", "singlefile", "-Onone")]:
+            for key, value in [("SWIFT_COMPILATION_MODE", mode), ("SWIFT_OPTIMIZATION_LEVEL", optimization)]:
+                with self.subTest(configuration=identifier, setting=key):
+                    settings = self.project["objects"][identifier]["buildSettings"]
+                    before = settings[key]
+                    try:
+                        settings[key] = value
+                        self.persist_project()
+                        with self.assertRaises(producer.PairVerificationError): self.proof()
+                    finally:
+                        settings[key] = before
+
+    def test_exact_project_codegen_overrides_are_accepted(self):
+        controls = {"CURRENT_PROJECT_VERSION": "1", "VERSION_INFO_PREFIX": "", "VERSIONING_SYSTEM": "apple-generic",
+            "FRAMEWORK_VERSION": "A", "DYLIB_COMPATIBILITY_VERSION": "1", "DYLIB_CURRENT_VERSION": "1",
+            "MACOSX_DEPLOYMENT_TARGET": "14.0"}
+        for identifier in ["PD", "PR"]:
+            self.project["objects"][identifier]["buildSettings"].update(controls)
+        self.persist_project()
+        self.proof()
 
     def test_foreign_workspace_and_scheme_are_refused(self):
         workspace = self.project_path.parent / "project.xcworkspace/contents.xcworkspacedata"
