@@ -41,6 +41,9 @@ final class TabManager {
   let(mixed,mg,mp)=fixture();mixed.workspaceGroups=[.init(liveAnchorWorkspaceId:mixed.tabs[0].id)]
   _=mixed.reorderSidebarWorkspaces(tabIds:mixed.tabs.prefix(2).map(\.id),draggedTabId:mixed.tabs[1].id,toIndex:0,isDragOperation:true,explicitGroupId:mg)
   values["native anchor remains intact in mixed requested block"] = mixed.tabs[0].groupPlacement?.planID == mp && mixed.tabs[1].groupPlacement == nil
+  let(anchorBlock,ab,ap)=fixture();anchorBlock.workspaceGroups=[.init(liveAnchorWorkspaceId:anchorBlock.tabs[0].id)]
+  _=anchorBlock.reorderSidebarWorkspaces(tabIds:anchorBlock.tabs.prefix(2).map(\.id),draggedTabId:anchorBlock.tabs[0].id,toIndex:0,isDragOperation:true,explicitGroupId:ab)
+  values["native anchor-only block excludes requested nonparticipating children"] = anchorBlock.tabs.prefix(2).allSatisfy{$0.groupPlacement?.planID == ap}
   let(mismatch,mismatchGroup,mismatchPlan)=fixture();mismatch.tabs[0].groupId=UUID()
   _=mismatch.reorderSidebarWorkspace(tabId:mismatch.tabs[0].id,toIndex:0,isDragOperation:true,explicitGroupId:mismatchGroup)
   values["operation without actual target membership grants no takeover"] = mismatch.tabs[0].groupPlacement?.planID == mismatchPlan
@@ -69,5 +72,5 @@ def main():
   values=json.loads(subprocess.run([str(binary)],check=True,capture_output=True,text=True,timeout=10).stdout)
   for name,passed in values.items():print(('PASS ' if passed else 'FAIL ')+name)
   print(json.dumps({'passed':sum(values.values()),'failed':sum(not v for v in values.values())}))
-  return 0 if len(values)==8 and all(values.values()) else 1
+  return 0 if len(values)==9 and all(values.values()) else 1
 if __name__=='__main__':raise SystemExit(main())
