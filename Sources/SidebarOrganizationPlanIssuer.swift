@@ -58,15 +58,23 @@ final class SidebarOrganizationPlanIssuer {
                   workspace.workspaceContext.context.analyzedProposal?.id == row.id,
                   retained.inventory.workspaces.contains(where: { $0.id == id && $0.groupID == nil && !$0.generatedAnchor }),
                   let metadata = retained.input.workspaces.first(where: { $0.id == row.workspaceId }) else { continue }
+            let context = workspace.workspaceContext.context
+            guard context.analyzedProposal?.sourceFingerprint == row.sourceFingerprint,
+                  !context.rejectedSourceFingerprints.contains(row.sourceFingerprint) else { continue }
+            let manualDimensions = Set(context.tags.filter { $0.origin == .manual }.map(\.dimension))
+            let rejectedIDs = Set(context.rejectedAutomaticTagIDs)
+            let candidates = row.suggestedTags.filter {
+                !manualDimensions.contains($0.dimension) && !rejectedIDs.contains($0.id)
+            }
             // Exact registered project references and actual repository directories
             // are produced by the native-owned canonical runner, never by caller evidence.
-            let projects = row.suggestedTags.filter { tag in
+            let projects = candidates.filter { tag in
                 tag.origin == .automatic && tag.dimension == "project" && tag.id.hasPrefix("project:")
                     && tag.source == "projects-ceo:" + String(tag.id.dropFirst("project:".count))
                     && (row.evidence ?? []).contains { $0.kind == "registered-project-reference"
                         && $0.reference == String(tag.id.dropFirst("project:".count)) }
             }
-            let repositories = row.suggestedTags.filter { tag in
+            let repositories = candidates.filter { tag in
                 tag.origin == .automatic && tag.dimension == "repository" && tag.id.hasPrefix("repository:")
                     && tag.source == "repo-classification:" + String(tag.id.dropFirst("repository:".count))
                     && (row.evidence ?? []).contains { evidence in
@@ -95,8 +103,11 @@ final class SidebarOrganizationPlanIssuer {
     func apply(_ id: UUID, manager: TabManager, authorized: @MainActor () -> Bool) async throws -> SidebarOrganizationPlanCoordinator.Receipt {
         guard !recoverySaturated, let registry, authorized() else { throw Failure.unavailable }
         if let retained = applied[id] {
+            let ids = retained.core.plan.assignments.map(\.workspaceID)
+            try verifyNotHeld(ids)
             let fresh = try await registry.read()
             try Task.checkCancellation()
+            try verifyNotHeld(ids)
             let adapter = SidebarOrganizationNativeAdapter(manager: manager, registryFingerprint: fresh)
             guard authorized(), fresh == retained.core.plan.sourceFingerprint,
                   try adapter.inventory() == retained.core.after,
@@ -104,8 +115,11 @@ final class SidebarOrganizationPlanIssuer {
             return retained.core
         }
         guard let retained = pending[id] else { throw Failure.unavailable }
+        let ids = retained.plan.assignments.map(\.workspaceID)
+        try verifyNotHeld(ids)
         let fresh = try await registry.read()
         try Task.checkCancellation()
+        try verifyNotHeld(ids)
         let adapter = SidebarOrganizationNativeAdapter(manager: manager, registryFingerprint: fresh)
         guard authorized(), fresh == retained.plan.sourceFingerprint,
               try adapter.inventory() == retained.plan.before,
@@ -150,6 +164,7 @@ final class SidebarOrganizationPlanIssuer {
     func rollback(_ id: UUID, manager: TabManager, authorized: @MainActor () -> Bool) throws {
         guard !recoverySaturated, let retained = applied[id], authorized() else { throw Failure.unavailable }
         let ids = retained.core.plan.assignments.map(\.workspaceID)
+        try verifyNotHeld(ids)
         let restore = try ledger.beforeRollback(retained.placement, observed: snapshots(manager, ids))
         // There is no suspension between this provenance fence and core mutation.
         let adapter = SidebarOrganizationNativeAdapter(manager: manager, registryFingerprint: retained.core.plan.sourceFingerprint)
@@ -194,6 +209,10 @@ final class SidebarOrganizationPlanIssuer {
         let combined = heldWorkspaces.union(ids)
         if combined.count > 256 { recoverySaturated = true }
         else { heldWorkspaces = combined }
+    }
+
+    private func verifyNotHeld(_ ids: [UUID]) throws {
+        guard !recoverySaturated, heldWorkspaces.isDisjoint(with: ids) else { throw Failure.recoveryRequired }
     }
 
     private func snapshots(_ manager: TabManager, _ ids: [UUID]) throws -> [Ledger.Snapshot] {
