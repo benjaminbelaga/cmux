@@ -142,5 +142,46 @@ class ImmutableGitlinkMaterializationTests(unittest.TestCase):
                 recipe.materialize_gitlinks(source, stage, commit, output)
 
 
+class IntegratedCortexLeafHydrationTests(unittest.TestCase):
+    def test_integrated_archive_hydrates_exact_missing_menu_leaves(self):
+        spec = importlib.util.spec_from_file_location("integrated_recipe",
+            REPO / "scripts/prepare-classic-sidebar-parity.py")
+        recipe = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(recipe)
+        with tempfile.TemporaryDirectory(prefix="cortex-integrated-leaves-") as directory:
+            root = Path(directory)
+            source, stage = root / "source", root / "stage"
+            source.mkdir(); stage.mkdir()
+            subprocess.run(["git", "init", str(source)], check=True, capture_output=True)
+            recipe.git(source, "config", "user.name", "Parity fixture")
+            recipe.git(source, "config", "user.email", "fixture@localhost")
+            recipe.git(source, "config", "core.hooksPath", str(root / "no-hooks"))
+            paths = ["Sources/CortexSessionsExtension/NativeWorkspaceParityMenu.swift",
+                     "Sources/CortexSessionsExtension/SidebarManualTagPicker.swift"]
+            for index, path in enumerate(paths):
+                leaf = source / "integrations/native-sidebar-parity" / path
+                leaf.parent.mkdir(parents=True, exist_ok=True)
+                leaf.write_text("// Exact committed menu component " + str(index) + "\n")
+            recipe.git(source, "add", "integrations")
+            recipe.git(source, "commit", "-m", "Pinned integrated components")
+            commit = recipe.git(source, "rev-parse", "HEAD").decode().strip()
+            # Simulate later owner work; an immutable artifact cannot adopt it.
+            (source / "integrations/native-sidebar-parity" / paths[0]).write_text("foreign dirty component\n")
+            hydrate = getattr(recipe, "hydrate_integrated_cortex", None)
+            # Before the additive producer, --integrated-bases did only marker
+            # checks and left both actual dependencies absent from its archive.
+            records = [] if hydrate is None else hydrate(source, stage, commit)
+            self.assertTrue(all((stage / path).is_file() for path in paths),
+                            "integrated archive omitted required native menu components")
+            self.assertEqual(len(records), 2)
+            for index, path in enumerate(paths):
+                self.assertEqual((stage / path).read_text(),
+                                 "// Exact committed menu component " + str(index) + "\n")
+            self.assertEqual(hydrate(source, stage, commit), records)
+            (stage / paths[0]).write_text("unexpected stage change\n")
+            with self.assertRaisesRegex(ValueError, "differs from immutable"):
+                hydrate(source, stage, commit)
+
+
 if __name__ == "__main__":
     unittest.main()
