@@ -8,7 +8,11 @@ import Observation
 final class SidebarOrganizationCoordinator {
     private let service: any SidebarOrganizationAnalyzing
     private let now: () -> Date
-    private var exports: [UUID: SidebarOrganizationInput] = [:]
+    private struct ExportReceipt {
+        let input: SidebarOrganizationInput
+        let nativeInventory: SidebarOrganizationInput
+    }
+    private var exports: [UUID: ExportReceipt] = [:]
     private let planIssuer: SidebarOrganizationPlanIssuer
 
     init(service: any SidebarOrganizationAnalyzing, registry: SidebarOrganizationRegistryReader? = nil,
@@ -24,14 +28,15 @@ final class SidebarOrganizationCoordinator {
         try Task.checkCancellation()
         let current = SidebarOrganizationInventoryBuilder(now: now).make(tabManager: tabManager, workspaceIDs: workspaceIDs)
         guard input.isValid, current.windowID == inventory.windowID,
-              current.workspaces == inventory.workspaces,
+              input.metadata.workspaces == inventory.metadata.workspaces,
+              current.nativeComparison.workspaces == inventory.nativeComparison.workspaces,
               workspaceIDs == nil || Set(input.workspaces.compactMap { UUID(uuidString: $0.id) }) == Set(workspaceIDs!) else { throw SidebarOrganizationService.Failure.invalidInput }
-        exports = exports.filter { now().timeIntervalSince($0.value.createdAt) <= 600 }
-        if exports.count >= 8, let oldest = exports.min(by: { $0.value.createdAt < $1.value.createdAt })?.key { exports.removeValue(forKey: oldest) }
+        exports = exports.filter { now().timeIntervalSince($0.value.input.createdAt) <= 600 }
+        if exports.count >= 8, let oldest = exports.min(by: { $0.value.input.createdAt < $1.value.input.createdAt })?.key { exports.removeValue(forKey: oldest) }
         let encoder = JSONEncoder(); encoder.dateEncodingStrategy = .iso8601
         let data = try encoder.encode(input)
         guard data.count <= 2 * 1024 * 1024 else { throw SidebarOrganizationService.Failure.invalidInput }
-        exports[input.id] = input
+        exports[input.id] = ExportReceipt(input: input, nativeInventory: inventory)
         return data
     }
 
@@ -40,17 +45,22 @@ final class SidebarOrganizationCoordinator {
                  authorized: @MainActor () -> Bool = { true }) async -> CmuxSidebarActionResult {
         guard authorized(), !Task.isCancelled else { return .cancelled }
         let input: SidebarOrganizationInput
+        let nativeInventory: SidebarOrganizationInput
         if let exportID {
-            guard let retained = exports[exportID], now().timeIntervalSince(retained.createdAt) <= 600 else { return stale }
-            input = retained
-        } else { input = SidebarOrganizationInventoryBuilder(now: now).make(tabManager: tabManager, workspaceIDs: workspaceIDs) }
+            guard let retained = exports[exportID], now().timeIntervalSince(retained.input.createdAt) <= 600 else { return stale }
+            input = retained.input
+            nativeInventory = retained.nativeInventory
+        } else {
+            input = SidebarOrganizationInventoryBuilder(now: now).make(tabManager: tabManager, workspaceIDs: workspaceIDs)
+            nativeInventory = input
+        }
         guard input.isValid, workspaceIDs == nil || Set(input.workspaces.compactMap { UUID(uuidString: $0.id) }) == Set(workspaceIDs!) else { return unavailable }
         do {
             let output = try await service.analyze(input, review: review)
             try Task.checkCancellation()
             let current = SidebarOrganizationInventoryBuilder(now: now).make(tabManager: tabManager, workspaceIDs: input.workspaces.compactMap { UUID(uuidString: $0.id) })
             guard authorized(), current.windowID == input.windowID,
-                  current.workspaces == input.metadata.workspaces else { return stale }
+                  current.nativeComparison.workspaces == nativeInventory.nativeComparison.workspaces else { return stale }
             // Validate the entire result before mutating native state. Only an
             // exact current repository attachment can automatically add its tag;
             // names, summaries, and semantic references remain reviewable.

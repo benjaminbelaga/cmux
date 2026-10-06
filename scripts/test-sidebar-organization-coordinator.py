@@ -80,7 +80,7 @@ enum SidebarOrganizationService {enum Failure:Error {case invalidInput}}
   checks["budget-removed enrichment compares original native export inventory"] = boundedPassed
   for mode in ["group-name","group-origin","gmail-disappears","browser-surface","source-account","source-uid","source-fingerprint","session","generation","directory","surface"] {
    let(m,w,service,_,coordinator)=fixture(grouped:mode.hasPrefix("group"),gmail:true)
-   if mode.hasPrefix("source") {var state=w.workspaceContext.persisted;state.context.sourceReferences=[.init(accountRef:"MBX"+String(repeating:"a",count:64),directoryUserId:"immutable-uid",resourceId:"GTK"+String(repeating:"b",count:64),messageId:"message-1",evidenceFingerprint:String(repeating:"c",count:64))];w.workspaceContext.restore(state)}
+   if mode.hasPrefix("source") {var state=w.workspaceContext.persisted;state.context.sourceReferences=[.init(accountRef:"MBX-"+String(repeating:"a",count:64),directoryUserId:"123456789",resourceId:"GTK-"+String(repeating:"b",count:64),messageId:"message-1",evidenceFingerprint:String(repeating:"c",count:64))];w.workspaceContext.restore(state);precondition(state.context.sourceReferences![0].isStructurallyValid)}
    let before=m.tabs.map{$0.workspaceContext.persisted}
    await service.configure(hook:{await MainActor.run {
     switch mode {
@@ -88,7 +88,7 @@ enum SidebarOrganizationService {enum Failure:Error {case invalidInput}}
     case "group-origin":w.groupPlacement=SidebarOrganizationPlacement(planID:UUID())
     case "gmail-disappears":w.browserURL=URL(string:"https://example.com")
     case "browser-surface","surface":w.surfaces[0]=UUID()
-    case "source-account","source-uid","source-fingerprint":var state=w.workspaceContext.persisted;var ref=state.context.sourceReferences![0];if mode == "source-account"{ref.accountRef="MBX"+String(repeating:"d",count:64)};if mode == "source-uid"{ref.directoryUserId="other-uid"};if mode == "source-fingerprint"{ref.evidenceFingerprint=String(repeating:"d",count:64)};state.context.sourceReferences=[ref];w.workspaceContext.restore(state)
+    case "source-account","source-uid","source-fingerprint":var state=w.workspaceContext.persisted;var ref=state.context.sourceReferences![0];if mode == "source-account"{ref.accountRef="MBX-"+String(repeating:"d",count:64)};if mode == "source-uid"{ref.directoryUserId="987654321"};if mode == "source-fingerprint"{ref.evidenceFingerprint=String(repeating:"d",count:64)};state.context.sourceReferences=[ref];w.workspaceContext.restore(state)
     default:let old=w.sessions[0];w.sessions[0] = .init(toolId:old.toolId,sessionId:mode == "session" ? "replacement" : old.sessionId,directory:mode == "directory" ? "/other" : old.directory,title:old.title,context:nil,surfaceId:old.surfaceId,processGeneration:mode == "generation" ? 2 : old.processGeneration)
     }
    }})

@@ -23,6 +23,7 @@ final class SidebarOrganizationNativeAdapter: SidebarOrganizationPlanCoordinator
         let color: String?
         let context: CmuxSidebarWorkspaceContext
         let sessions: [SidebarOrganizationInput.Session]
+        let serviceObservations: [SidebarOrganizationInput.ServiceObservation]?
         let orderedSurfaceIDs: [UUID]
     }
 
@@ -55,7 +56,7 @@ final class SidebarOrganizationNativeAdapter: SidebarOrganizationPlanCoordinator
         let groups = Dictionary(manager.workspaceGroups.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
         let membership = SidebarWorkspaceRenderItem.effectiveGroupIdByWorkspaceId(tabs: manager.tabs, groupsById: groups)
         let generated = Set(manager.workspaceGroups.filter(\.isGeneratedAnchor).compactMap(\.liveAnchorWorkspaceId))
-        let nativeMetadata = SidebarOrganizationInventoryBuilder().make(tabManager: manager).metadata
+        let nativeMetadata = SidebarOrganizationInventoryBuilder().make(tabManager: manager).nativeComparison
         let workspaces = try manager.tabs.map { workspace in
             Plan.Workspace(id: workspace.id, revision: workspace.workspaceContext.context.revision,
                 title: workspace.title,
@@ -63,6 +64,7 @@ final class SidebarOrganizationNativeAdapter: SidebarOrganizationPlanCoordinator
                     isPinned: workspace.isPinned, importance: workspace.importance.rawValue,
                     isMuted: workspace.isMuted, color: workspace.customColor, context: workspace.workspaceContext.context,
                     sessions: nativeMetadata.workspaces.first(where: { $0.id == workspace.id.uuidString })?.sessions ?? [],
+                    serviceObservations: nativeMetadata.workspaces.first(where: { $0.id == workspace.id.uuidString })?.serviceObservations,
                     orderedSurfaceIDs: workspace.sidebarOrderedPanelIds())),
                 groupID: membership[workspace.id] ?? nil, generatedAnchor: generated.contains(workspace.id))
         }

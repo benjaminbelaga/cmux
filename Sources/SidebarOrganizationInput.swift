@@ -177,6 +177,22 @@ struct SidebarOrganizationInput: Codable, Equatable, Sendable {
         return result
     }
 
+    /// Compare native identity and navigation semantics independently of
+    /// transcript enrichment and the refresh time of current browser evidence.
+    var nativeComparison: Self {
+        var result = self
+        for workspace in result.workspaces.indices {
+            result.workspaces[workspace].serviceObservations = result.workspaces[workspace].serviceObservations.map { observations in
+                observations.map { .init(service: $0.service, surfaceId: $0.surfaceId,
+                    kind: $0.kind, observedAt: Date(timeIntervalSince1970: 0)) }
+            }
+            for session in result.workspaces[workspace].sessions.indices {
+                result.workspaces[workspace].sessions[session].context = nil
+            }
+        }
+        return result
+    }
+
     var isValid: Bool {
         !workspaces.isEmpty && workspaces.count <= 256
             && Set(workspaces.map(\.id)).count == workspaces.count
