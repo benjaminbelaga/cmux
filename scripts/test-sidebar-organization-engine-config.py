@@ -75,6 +75,11 @@ actor Probe:CommandRunning {
   checks["wrong source bytes hold"] = try !accepted(["CMUX_ORGANIZATION_ENGINE_SHA256":String(repeating:"b",count:64)])
   checks["trailing newline source and fingerprint hold"] = try !accepted(["CMUX_ORGANIZATION_ENGINE_SOURCE":source+"\n"]) && !accepted(["CMUX_ORGANIZATION_ENGINE_SHA256":hash+"\n"])
   try FileManager.default.setAttributes([.posixPermissions:0o644],ofItemAtPath:engine.path)
+  for mode in [0o4600,0o2600,0o1600] {
+   try FileManager.default.setAttributes([.posixPermissions:mode],ofItemAtPath:engine.path)
+   checks["special engine mode holds new and cached configuration \(mode)"] = try !accepted() && configured?.isCurrent() == false
+  }
+  try FileManager.default.setAttributes([.posixPermissions:0o644],ofItemAtPath:engine.path)
   checks["public engine mode holds"] = try !accepted()
   checks["cached configuration rechecks changed mode"] = configured?.isCurrent() == false
   try FileManager.default.setAttributes([.posixPermissions:0o600],ofItemAtPath:engine.path)
@@ -147,10 +152,18 @@ actor Probe:CommandRunning {
   }
   let projectedSeal = try projected()
   checks["reviewed private projection accepted"] = projectedSeal?.rulesURL == projectedRules
-  checks["projection without fifth environment pin holds"] = try projected(["CMUX_ORGANIZATION_RULES_SHA256":""]) == nil
+  checks["projected path without any fifth environment pin holds"] = try !accepted(["CMUX_ORGANIZATION_RULES_PATH":projectedRules.path])
+  checks["present empty fifth environment pin holds"] = try projected(["CMUX_ORGANIZATION_RULES_SHA256":""]) == nil
   checks["projected rules pin cannot authorize canonical or caller path"] = try projected(["CMUX_ORGANIZATION_RULES_PATH":rules.path]) == nil
   checks["wrong projected rules pin holds"] = try projected(["CMUX_ORGANIZATION_RULES_SHA256":String(repeating:"c",count:64)]) == nil
   checks["newline projected rules pin holds"] = try projected(["CMUX_ORGANIZATION_RULES_SHA256":ruleHash+"\n"]) == nil
+  for (kind,path) in [("rules",projectedRules),("receipt",projectedReceipt)] {
+   for mode in [0o4600,0o2600,0o1600] {
+    try FileManager.default.setAttributes([.posixPermissions:mode],ofItemAtPath:path.path)
+    checks["special projected "+kind+" mode holds new and cached configuration \(mode)"] = try projected() == nil && projectedSeal?.isCurrent() == false
+   }
+   try restoreRules()
+  }
   try FileManager.default.setAttributes([.posixPermissions:0o644],ofItemAtPath:projectedRules.path)
   checks["public rules file holds new and cached configuration"] = try projected() == nil && projectedSeal?.isCurrent() == false
   try restoreRules()
@@ -245,7 +258,7 @@ def main():
         for name, passed in checks.items():
             print(('PASS ' if passed else 'FAIL ')+name)
         print(json.dumps({'passed': sum(checks.values()), 'failed': sum(not v for v in checks.values())}))
-        return 0 if len(checks) == 49 and all(checks.values()) else 1
+        return 0 if len(checks) == 59 and all(checks.values()) else 1
 
 
 if __name__ == '__main__':
