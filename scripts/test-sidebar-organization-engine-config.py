@@ -28,6 +28,10 @@ actor Probe:CommandRunning {
   if (python && mode == "python-drift") || (!python && mode == "engine-drift") {
    try! Data("changed after cached configuration".utf8).write(to:engine)
   }
+  let ruleDrift = (python && mode == "rules-python-drift") || (!python && mode == "rules-engine-drift")
+  let receiptDrift = (python && mode == "receipt-python-drift") || (!python && mode == "receipt-engine-drift")
+  if ruleDrift { try! Data("changed projected rules".utf8).write(to:rules) }
+  if receiptDrift { try! Data("changed projected receipt".utf8).write(to:rules.deletingLastPathComponent().appendingPathComponent("receipt.json")) }
   var object:[String:Any]=["schemaVersion":1,"registryFingerprint":String(repeating:"a",count:64)]
   if arguments.contains("--registry-fingerprint"){object["authority"]="none"}
   else {object["proposals"]=[];object["diagnostics"]=[]}
@@ -110,6 +114,106 @@ actor Probe:CommandRunning {
    let service=SidebarOrganizationService(commands:Probe(engine:engine,rules:rules,mode:mode),homeDirectory:root,temporaryDirectory:root,engineURL:engine,rulesURL:rules,engineValidation:{seal.isCurrent()},pythonCandidates:["/python"])
    checks["classification holds "+mode] = await rejects{_ = try await service.analyze(input)}
   }
+
+  // Generated rules are inert navigation evidence, not business authority.
+  try restore()
+  let runtime = root.appendingPathComponent(".local/share/cmux-session-organization")
+  let rulesRoot = runtime.appendingPathComponent("rules")
+  let ruleBytes = Data("schema_version: 1\nnavigation: {}\n".utf8)
+  let ruleHash = SHA256.hash(data:ruleBytes).map{String(format:"%02x",$0)}.joined()
+  let projectedDirectory = rulesRoot.appendingPathComponent(source+"-"+ruleHash)
+  try FileManager.default.createDirectory(at:projectedDirectory,withIntermediateDirectories:true)
+  for path in [runtime,rulesRoot,projectedDirectory] {
+   try FileManager.default.setAttributes([.posixPermissions:0o700],ofItemAtPath:path.path)
+  }
+  let projectedRules = projectedDirectory.appendingPathComponent("session-organization.yaml")
+  let projectedReceipt = projectedDirectory.appendingPathComponent("receipt.json")
+  let receipt:[String:Any] = ["schemaVersion":1,"authority":"none","sourceCommit":source,
+   "sourceYamlSHA256":String(repeating:"b",count:64),"projectionSHA256":ruleHash,
+   "engineSHA256":hash,"canonicalFactsRoot":root.appendingPathComponent("repos/ecosystem").path]
+  let receiptBytes = try JSONSerialization.data(withJSONObject:receipt,options:.sortedKeys)
+  func restoreRules() throws {
+   try ruleBytes.write(to:projectedRules);try receiptBytes.write(to:projectedReceipt)
+   for path in [projectedRules,projectedReceipt] {
+    try FileManager.default.setAttributes([.posixPermissions:0o600],ofItemAtPath:path.path)
+   }
+  }
+  try restoreRules()
+  let projectedEnvironment = ["CMUX_ORGANIZATION_RULES_PATH":projectedRules.path,"CMUX_ORGANIZATION_RULES_SHA256":ruleHash]
+  func projected(_ changes:[String:String]=[:]) throws -> SidebarOrganizationEngineConfiguration? {
+   var environment = projectedEnvironment
+   for(k,v) in changes {environment[k]=v}
+   return SidebarOrganizationEngineConfiguration(bundle:try bundle(environment),homeDirectory:root)
+  }
+  let projectedSeal = try projected()
+  checks["reviewed private projection accepted"] = projectedSeal?.rulesURL == projectedRules
+  checks["projection without fifth environment pin holds"] = try projected(["CMUX_ORGANIZATION_RULES_SHA256":""]) == nil
+  checks["projected rules pin cannot authorize canonical or caller path"] = try projected(["CMUX_ORGANIZATION_RULES_PATH":rules.path]) == nil
+  checks["wrong projected rules pin holds"] = try projected(["CMUX_ORGANIZATION_RULES_SHA256":String(repeating:"c",count:64)]) == nil
+  checks["newline projected rules pin holds"] = try projected(["CMUX_ORGANIZATION_RULES_SHA256":ruleHash+"\n"]) == nil
+  try FileManager.default.setAttributes([.posixPermissions:0o644],ofItemAtPath:projectedRules.path)
+  checks["public rules file holds new and cached configuration"] = try projected() == nil && projectedSeal?.isCurrent() == false
+  try restoreRules()
+  try FileManager.default.setAttributes([.posixPermissions:0o755],ofItemAtPath:projectedDirectory.path)
+  checks["public rules directory holds new and cached configuration"] = try projected() == nil && projectedSeal?.isCurrent() == false
+  try FileManager.default.setAttributes([.posixPermissions:0o700],ofItemAtPath:projectedDirectory.path)
+  try Data(repeating:120,count:256*1024+1).write(to:projectedRules)
+  checks["oversized rules file holds"] = try projected() == nil
+  try restoreRules()
+  try Data("altered rules".utf8).write(to:projectedRules)
+  checks["cached configuration holds changed rules bytes"] = projectedSeal?.isCurrent() == false
+  try restoreRules()
+  let elsewhere = root.appendingPathComponent("elsewhere-rules")
+  try FileManager.default.moveItem(at:projectedRules,to:elsewhere)
+  try FileManager.default.createSymbolicLink(at:projectedRules,withDestinationURL:elsewhere)
+  checks["symlink projected rules holds new and cached configuration"] = try projected() == nil && projectedSeal?.isCurrent() == false
+  try FileManager.default.removeItem(at:projectedRules);try FileManager.default.moveItem(at:elsewhere,to:projectedRules)
+  for (field,value) in [("authority","execute"),("sourceCommit",String(repeating:"c",count:40)),
+      ("engineSHA256",String(repeating:"c",count:64)),("sourceYamlSHA256","malformed"),
+      ("canonicalFactsRoot","/foreign/facts"),("unexpected","value")] {
+   var changed = receipt;changed[field] = value
+   try JSONSerialization.data(withJSONObject:changed).write(to:projectedReceipt)
+   checks["invalid projected receipt holds "+field] = try projected() == nil
+  }
+  try restoreRules()
+  try FileManager.default.setAttributes([.posixPermissions:0o644],ofItemAtPath:projectedReceipt.path)
+  checks["public receipt holds new and cached configuration"] = try projected() == nil && projectedSeal?.isCurrent() == false
+  try restoreRules()
+  try (receiptBytes+Data("\n".utf8)).write(to:projectedReceipt)
+  checks["cached receipt byte drift holds even with equal JSON fields"] = projectedSeal?.isCurrent() == false
+  try restoreRules()
+  let copiedReceipt=root.appendingPathComponent("elsewhere-receipt")
+  try FileManager.default.moveItem(at:projectedReceipt,to:copiedReceipt)
+  try FileManager.default.createSymbolicLink(at:projectedReceipt,withDestinationURL:copiedReceipt)
+  checks["symlink receipt holds new and cached configuration"] = try projected() == nil && projectedSeal?.isCurrent() == false
+  try FileManager.default.removeItem(at:projectedReceipt);try FileManager.default.moveItem(at:copiedReceipt,to:projectedReceipt)
+  let projectedProbe = Probe(engine:engine,rules:projectedRules)
+  let projectedReader = SidebarOrganizationRegistryReader(engineURL:engine,rulesURL:projectedRules,commands:projectedProbe,engineValidation:{projectedSeal?.isCurrent() == true},pythonCandidates:["/python"])
+  let projectedService = SidebarOrganizationService(commands:projectedProbe,homeDirectory:root,temporaryDirectory:root,engineURL:engine,rulesURL:projectedRules,engineValidation:{projectedSeal?.isCurrent() == true},pythonCandidates:["/python"])
+  let readHeld = await rejects{_ = try await projectedReader.read()}
+  let analysisHeld = await rejects{_ = try await projectedService.analyze(input)}
+  let projectedCalls = await projectedProbe.calls
+  let projectedPaths = await projectedProbe.samePaths
+  checks["actual analysis and registry consume the same pinned projection"] = !readHeld && !analysisHeld && projectedCalls >= 4 && projectedPaths
+  try Data("changed after projected config was cached".utf8).write(to:projectedRules)
+  let heldReader = await rejects{_ = try await projectedReader.read()}
+  let heldService = await rejects{_ = try await projectedService.analyze(input)}
+  let heldCalls = await projectedProbe.calls
+  checks["both consumers hold rules drift before spawning a child"] = heldReader && heldService && heldCalls == projectedCalls && projectedSeal != nil
+  try restoreRules()
+  for mode in ["rules-python-drift","rules-engine-drift","receipt-python-drift","receipt-engine-drift"] {
+   let commands = Probe(engine:engine,rules:projectedRules,mode:mode)
+   let reader = SidebarOrganizationRegistryReader(engineURL:engine,rulesURL:projectedRules,commands:commands,engineValidation:{projectedSeal?.isCurrent() == true},pythonCandidates:["/python"])
+   let rejected = await rejects{_ = try await reader.read()};let callCount = await commands.calls
+   checks["registry rejects projected drift across await "+mode] = rejected && callCount > 0 && projectedSeal != nil
+   try restoreRules()
+   let analysisCommands = Probe(engine:engine,rules:projectedRules,mode:mode)
+   let analyzer = SidebarOrganizationService(commands:analysisCommands,homeDirectory:root,temporaryDirectory:root,engineURL:engine,rulesURL:projectedRules,engineValidation:{projectedSeal?.isCurrent() == true},pythonCandidates:["/python"])
+   let analysisRejected = await rejects{_ = try await analyzer.analyze(input)};let analysisCalls = await analysisCommands.calls
+   checks["classification rejects projected drift across await "+mode] = analysisRejected && analysisCalls > 0 && projectedSeal != nil
+   try restoreRules()
+  }
+
   print(String(decoding:try JSONSerialization.data(withJSONObject:checks,options:.sortedKeys),as:UTF8.self))
  }
 }
@@ -141,7 +245,7 @@ def main():
         for name, passed in checks.items():
             print(('PASS ' if passed else 'FAIL ')+name)
         print(json.dumps({'passed': sum(checks.values()), 'failed': sum(not v for v in checks.values())}))
-        return 0 if len(checks) == 20 and all(checks.values()) else 1
+        return 0 if len(checks) == 49 and all(checks.values()) else 1
 
 
 if __name__ == '__main__':
