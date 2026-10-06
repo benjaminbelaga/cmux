@@ -103,7 +103,7 @@ def main():
         swift = temporary / 'Contract.swift'
         swift.write_text(contract)
         binary = temporary / 'contract'
-        compiled = subprocess.run(['xcrun', 'swiftc', '-swift-version', '6', '-strict-concurrency=complete', str(swift), '-o', str(binary)], capture_output=True, text=True, timeout=90)
+        compiled = subprocess.run(['xcrun', 'swiftc', '-parse-as-library', '-swift-version', '6', '-strict-concurrency=complete', str(swift), '-o', str(binary)], capture_output=True, text=True, timeout=90)
         if compiled.returncode:
             print(compiled.stderr)
             return 2
