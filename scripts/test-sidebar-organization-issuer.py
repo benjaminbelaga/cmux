@@ -157,6 +157,16 @@ actor Probe:CommandRunning {
   func prepareTicket(_ expected:UUID) async throws -> P {PREPARE_CLASSIFICATION}
   checks["different retained classification cannot authorize requested plan"] = await rejects{_ = try await prepareTicket(ticketA)} && ticketManager.writes == 0
   checks["exact retained classification authorizes its reviewed mapping"] = try await prepareTicket(ticketB).assignments.count == 1
+  let(waitManager,waitRow,waitProbe,waitIssuer)=try fixture(classificationTicket:ticketA)
+  await waitProbe.setHook {await MainActor.run {
+   let retained=waitRow.workspaceContext.context.analyzedProposal!
+   let replacement=SidebarOrganizationOutput.Proposal(workspaceId:waitRow.id.uuidString,expectedRevision:waitRow.workspaceContext.context.revision,id:retained.id,suggestedTags:retained.suggestedTags,suggestedTitle:nil,summary:nil,source:retained.source,sourceFingerprint:retained.sourceFingerprint,conversationIDs:retained.conversationIDs,analyzedAt:retained.analyzedAt,evidence:[.init(kind:"registered-repository-directory",reference:"registered",sessionId:"native-session")])
+   let input=SidebarOrganizationInventoryBuilder().make(tabManager:waitManager)
+   let inventory=try! SidebarOrganizationNativeAdapter(manager:waitManager,registryFingerprint:String(repeating:"a",count:64)).inventory()
+   waitIssuer.retain(output:.init(schemaVersion:1,proposals:[replacement],diagnostics:[],registryFingerprint:String(repeating:"a",count:64)),input:input,inventory:inventory,classificationID:ticketB)
+  }}
+  checks["retained classification replaced during registry wait cannot issue old plan"] = await rejects{_ = try await waitIssuer.prepare(manager:waitManager,authorized:{true},classificationID:ticketA)} && waitManager.writes == 0
+  checks["replacement classification remains usable after held old ticket"] = try await waitIssuer.prepare(manager:waitManager,authorized:{true},classificationID:ticketB).assignments.count == 1
   _ = probe
   print(String(decoding:try JSONSerialization.data(withJSONObject:checks,options:.sortedKeys),as:UTF8.self))
  }
@@ -191,7 +201,7 @@ def main():
         for name, passed in checks.items():
             print(('PASS ' if passed else 'FAIL ')+name)
         print(json.dumps({'passed': sum(checks.values()), 'failed': sum(not value for value in checks.values())}))
-        return 0 if len(checks) == 25 and all(checks.values()) else 1
+        return 0 if len(checks) == 27 and all(checks.values()) else 1
 
 
 if __name__ == '__main__':

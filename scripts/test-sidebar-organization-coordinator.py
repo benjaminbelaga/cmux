@@ -36,8 +36,8 @@ HARNESS = containers + r'''
 }
 @MainActor final class Clock {var value=Date(timeIntervalSince1970:1_790_208_000);func next()->Date{defer{value+=1};return value}}
 actor Analysis:SidebarOrganizationAnalyzing {
- var trim=false;var hook:(@Sendable () async -> Void)?
- func configure(trim:Bool=false,hook:(@Sendable () async -> Void)?=nil){self.trim=trim;self.hook=hook}
+ var trim=false;var registered=false;var hook:(@Sendable () async -> Void)?
+ func configure(trim:Bool=false,registered:Bool=false,hook:(@Sendable () async -> Void)?=nil){self.trim=trim;self.registered=registered;self.hook=hook}
  func prepare(_ input:SidebarOrganizationInput) async throws -> SidebarOrganizationInput {
   var result=input
   for index in result.workspaces.indices {
@@ -49,9 +49,9 @@ actor Analysis:SidebarOrganizationAnalyzing {
  func analyze(_ input:SidebarOrganizationInput,review:Data?) async throws -> SidebarOrganizationOutput {
   if let hook{self.hook=nil;await hook()}
   let rows=input.workspaces.map {w in
-   SidebarOrganizationOutput.Proposal(workspaceId:w.id,expectedRevision:w.revision,id:UUID(),suggestedTags:[.init(id:"topic:hr",label:"HR",dimension:"topic",origin:.automatic,source:"session-organization")],suggestedTitle:nil,summary:nil,source:"session-organization",sourceFingerprint:String(repeating:"b",count:64),conversationIDs:w.sessions.map(\.sessionId),analyzedAt:Date(),evidence:nil)
+   SidebarOrganizationOutput.Proposal(workspaceId:w.id,expectedRevision:w.revision,id:UUID(),suggestedTags:[.init(id:registered ? "project:registered" : "topic:hr",label:registered ? "Registered" : "HR",dimension:registered ? "project" : "topic",origin:.automatic,source:registered ? "projects-ceo:registered" : "session-organization")],suggestedTitle:nil,summary:nil,source:"session-organization",sourceFingerprint:String(repeating:"b",count:64),conversationIDs:w.sessions.map(\.sessionId),analyzedAt:Date(),evidence:registered ? [.init(kind:"registered-project-reference",reference:"registered",sessionId:nil)] : nil)
   }
-  return .init(schemaVersion:1,proposals:rows,diagnostics:[])
+  return .init(schemaVersion:1,proposals:rows,diagnostics:[],registryFingerprint:registered ? String(repeating:"a",count:64) : nil)
  }
 }
 // Only the failure type is needed from the real transport implementation. The
@@ -101,6 +101,13 @@ enum SidebarOrganizationService {enum Failure:Error {case invalidInput}}
   await staleService.configure(hook:{await MainActor.run{stale.workspaceGroups[0].name="Changed after export"}})
   let result=await staleCoordinator.analyze(tabManager:stale,exportID:export.id)
   checks["retained export still fences later manual folder rename"] = !result.accepted && stale.tabs.allSatisfy{$0.workspaceContext.context.revision==0}
+  let selectionManager=TabManager(),selectionRow=Workspace(),excludedRow=Workspace(),selectionService=Analysis(),selectionProbe=Probe()
+  selectionManager.tabs=[selectionRow,excludedRow]
+  await selectionService.configure(registered:true)
+  let selectionRegistry=SidebarOrganizationRegistryReader(engineURL:URL(fileURLWithPath:"/immutable/engine.py"),rulesURL:URL(fileURLWithPath:"/current/rules.yaml"),commands:selectionProbe,pythonCandidates:["/python"])
+  let selectionCoordinator=SidebarOrganizationCoordinator(service:selectionService,registry:selectionRegistry)
+  let selectionPlan=try await selectionCoordinator.preparePlan(tabManager:selectionManager,workspaceIDs:[selectionRow.id],authorized:{true})
+  checks["actual coordinator preparePlan preserves requested subset and private ticket through issuer"] = selectionPlan.assignments.map(\.workspaceID) == [selectionRow.id] && selectionPlan.sourceFingerprint == String(repeating:"a",count:64) && selectionManager.writes == 0 && selectionRow.workspaceContext.context.revision == 1 && excludedRow.workspaceContext.context.revision == 0
   print(String(decoding:try JSONSerialization.data(withJSONObject:checks,options:.sortedKeys),as:UTF8.self))
  }
 }
@@ -129,7 +136,7 @@ def main():
         for name, passed in checks.items():
             print(('PASS ' if passed else 'FAIL ')+name)
         print(json.dumps({'passed': sum(checks.values()), 'failed': sum(not value for value in checks.values())}))
-        return 0 if len(checks) == 15 and all(checks.values()) else 1
+        return 0 if len(checks) == 16 and all(checks.values()) else 1
 
 
 if __name__ == '__main__':
