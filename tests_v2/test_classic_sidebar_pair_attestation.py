@@ -2,7 +2,6 @@
 """Synthetic negative proofs for canonical pair attestation; no app launches."""
 import importlib.util
 import getpass
-import hashlib
 import json
 from pathlib import Path
 import plistlib
@@ -385,6 +384,48 @@ class SDKMaterializationTests(unittest.TestCase):
         self.info_path.rename(external / self.info_path.name)
         self.info_path.parent.rmdir()
         self.info_path.parent.symlink_to(external, target_is_directory=True)
+        with self.assertRaises(producer.PairVerificationError): self.proof()
+
+    def test_group_traversal_is_refused(self):
+        self.project["objects"]["K"]["path"] = "../../foreign"
+        self.persist_project()
+        with self.assertRaises(producer.PairVerificationError): self.proof()
+
+    def test_compile_input_with_two_parents_is_refused(self):
+        self.project["objects"]["G"]["children"].append("F1")
+        self.persist_project()
+        with self.assertRaises(producer.PairVerificationError): self.proof()
+
+    def test_per_file_flags_are_refused(self):
+        self.project["objects"]["B1"]["settings"] = {"COMPILER_FLAGS": "-include /tmp/foreign.h"}
+        self.persist_project()
+        with self.assertRaises(producer.PairVerificationError): self.proof()
+
+    def test_alternate_compiler_is_refused(self):
+        self.project["objects"]["TD"]["buildSettings"]["SWIFT_EXEC"] = "/tmp/foreign-compiler"
+        self.persist_project()
+        with self.assertRaises(producer.PairVerificationError): self.proof()
+
+    def test_external_xcconfig_is_refused(self):
+        self.project["objects"]["TD"]["baseConfigurationReference"] = "FOREIGN"
+        self.persist_project()
+        with self.assertRaises(producer.PairVerificationError): self.proof()
+
+    def test_external_framework_search_root_is_refused(self):
+        self.project["objects"]["TD"]["buildSettings"]["FRAMEWORK_SEARCH_PATHS"] = ["/tmp/foreign"]
+        self.persist_project()
+        with self.assertRaises(producer.PairVerificationError): self.proof()
+
+    def test_partial_generated_set_is_refused(self):
+        self.info_path.unlink()
+        with self.assertRaises(producer.PairVerificationError): self.proof()
+
+    def test_foreign_workspace_and_scheme_are_refused(self):
+        workspace = self.project_path.parent / "project.xcworkspace/contents.xcworkspacedata"
+        workspace.write_text('<Workspace version="1.0"><FileRef location="absolute:/tmp/foreign.xcodeproj"/></Workspace>')
+        with self.assertRaises(producer.PairVerificationError): self.proof()
+        workspace.write_text('<Workspace version="1.0"><FileRef location="self:"/></Workspace>')
+        self.user_scheme.write_bytes(plistlib.dumps({"SchemeUserState": {"Foreign.xcscheme": {}}}))
         with self.assertRaises(producer.PairVerificationError): self.proof()
 
 
