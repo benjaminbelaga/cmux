@@ -1,10 +1,13 @@
 #!/usr/bin/env python3
 """Synthetic negative proofs for canonical pair attestation; no app launches."""
 import importlib.util
+import getpass
+import hashlib
 import json
 from pathlib import Path
 import plistlib
 import subprocess
+import shutil
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -255,6 +258,134 @@ class PairAttestationTests(unittest.TestCase):
         path.write_text(json.dumps(manifest))
         with self.assertRaisesRegex(producer.PairVerificationError, "readiness claim"):
             producer.revalidate(path, runner=self.runner)
+
+
+class SDKMaterializationTests(unittest.TestCase):
+    """Exercise the real archive/materialization consumer, without app builds."""
+    def setUp(self):
+        self.scratch = tempfile.TemporaryDirectory(prefix="pair-sdk-fixture-")
+        self.addCleanup(self.scratch.cleanup)
+        self.root = Path(self.scratch.name)
+        self.repo = self.root / "source"
+        self.repo.mkdir()
+        self.hooks = self.root / "empty-private-hooks"
+        self.hooks.mkdir()
+        self.prefix = Path("Packages/macOS/CmuxExtensionKit")
+        self.package = self.repo / self.prefix
+        self.swift_paths = ["Sources/CmuxExtensionKit/One.swift", "Sources/CmuxExtensionKit/Two.swift"]
+        for relative in self.swift_paths + ["Package.swift"]:
+            path = self.package / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("// Canonical fixture " + relative + "\n")
+        self.git("init", "-q")
+        self.git("add", ".")
+        self.git("-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit", "-qm", "SDK fixture")
+        self.revision = self.git("rev-parse", "HEAD").strip()
+        self.materialized = self.root / "Vendor/cmux-extension-kit"
+        shutil.copytree(self.package, self.materialized)
+        (self.materialized / ".source-revision").write_text(self.revision + "\n")
+        self.project_path = self.materialized / "CmuxExtensionKit.xcodeproj/project.pbxproj"
+        self.project_path.parent.mkdir()
+        objects = {
+            "P": {"isa": "PBXProject", "mainGroup": "G", "targets": ["T"], "buildConfigurationList": "PC", "projectDirPath": "", "projectRoot": ""},
+            "G": {"isa": "PBXGroup", "sourceTree": "<group>", "children": ["S", "PRODUCT"]},
+            "S": {"isa": "PBXGroup", "sourceTree": "<group>", "path": "Sources", "children": ["K"]},
+            "K": {"isa": "PBXGroup", "sourceTree": "<group>", "path": "CmuxExtensionKit", "children": ["F1", "F2"]},
+            "PRODUCT": {"isa": "PBXFileReference", "sourceTree": "BUILT_PRODUCTS_DIR", "path": "CmuxExtensionKit.framework"},
+            "T": {"isa": "PBXNativeTarget", "name": "CmuxExtensionKit", "productName": "CmuxExtensionKit", "productType": "com.apple.product-type.framework", "productReference": "PRODUCT", "buildConfigurationList": "TC", "buildPhases": ["SOURCE", "FRAMEWORK", "RESOURCE", "COPY"], "buildRules": [], "dependencies": [], "packageProductDependencies": []},
+            "SOURCE": {"isa": "PBXSourcesBuildPhase", "files": ["B1", "B2"]},
+            "FRAMEWORK": {"isa": "PBXFrameworksBuildPhase", "files": []},
+            "RESOURCE": {"isa": "PBXResourcesBuildPhase", "files": []},
+            "COPY": {"isa": "PBXCopyFilesBuildPhase", "files": [], "dstPath": "", "dstSubfolderSpec": "10"},
+            "PC": {"isa": "XCConfigurationList", "buildConfigurations": ["PD", "PR"]},
+            "TC": {"isa": "XCConfigurationList", "buildConfigurations": ["TD", "TR"]},
+        }
+        for index, name in enumerate(["One.swift", "Two.swift"], 1):
+            objects["F" + str(index)] = {"isa": "PBXFileReference", "sourceTree": "<group>", "path": name, "lastKnownFileType": "sourcecode.swift"}
+            objects["B" + str(index)] = {"isa": "PBXBuildFile", "fileRef": "F" + str(index)}
+        for key, name in [("PD", "Debug"), ("PR", "Release"), ("TD", "Debug"), ("TR", "Release")]:
+            settings = {"OTHER_SWIFT_FLAGS": ["$(inherited)", "-package-name", "CmuxExtensionKit"]} if key.startswith("P") else {
+                "OTHER_SWIFT_FLAGS": "$(inherited)", "INFOPLIST_FILE": "Derived/InfoPlists/CmuxExtensionKit-Info.plist", "MACH_O_TYPE": "staticlib", "PRODUCT_NAME": "CmuxExtensionKit"}
+            objects[key] = {"isa": "XCBuildConfiguration", "name": name, "buildSettings": settings}
+        self.project = {"archiveVersion": "1", "objectVersion": "55", "classes": {}, "objects": objects, "rootObject": "P"}
+        self.persist_project()
+        workspace = self.project_path.parent / "project.xcworkspace/contents.xcworkspacedata"
+        workspace.parent.mkdir()
+        workspace.write_text('<Workspace version="1.0"><FileRef location="self:"/></Workspace>')
+        self.user_scheme = self.project_path.parent / ("xcuserdata/" + getpass.getuser() + ".xcuserdatad/xcschemes/xcschememanagement.plist")
+        self.user_scheme.parent.mkdir(parents=True)
+        self.user_scheme.write_bytes(plistlib.dumps({"SchemeUserState": {}}))
+        self.info_path = self.materialized / "Derived/InfoPlists/CmuxExtensionKit-Info.plist"
+        self.info_path.parent.mkdir(parents=True)
+        self.info = {"CFBundleDevelopmentRegion": "$(DEVELOPMENT_LANGUAGE)", "CFBundleExecutable": "$(EXECUTABLE_NAME)", "CFBundleIdentifier": "$(PRODUCT_BUNDLE_IDENTIFIER)", "CFBundleInfoDictionaryVersion": "6.0", "CFBundleName": "$(PRODUCT_NAME)", "CFBundlePackageType": "FMWK", "CFBundleShortVersionString": "1.0", "CFBundleVersion": "1", "NSHumanReadableCopyright": "Copyright ©. All rights reserved."}
+        self.info_path.write_bytes(plistlib.dumps(self.info))
+
+    def git(self, *args):
+        return subprocess.check_output(["/usr/bin/git", "-c", "core.hooksPath=" + str(self.hooks), "-C", str(self.repo), *args], text=True)
+
+    def persist_project(self):
+        # plistlib supplies the same normalized object graph plutil extracts
+        # from Tuist's OpenStep plist on macOS; no copied parser implementation.
+        self.project_path.write_bytes(plistlib.dumps(self.project))
+
+    def proof(self):
+        return producer.sdk_proof(self.repo, self.revision, self.materialized)
+
+    def test_canonical_generated_sdk_is_verified_and_generated_bytes_are_sealed(self):
+        result = self.proof()
+        self.assertEqual(set(result["sourcePaths"]), set(self.swift_paths))
+        self.assertEqual(len(result["generatedArtifacts"]), 4)
+        before = result["generatedArtifactsFingerprint"]
+        self.user_scheme.write_bytes(plistlib.dumps({"SchemeUserState": {}}, sort_keys=False, fmt=plistlib.FMT_BINARY))
+        self.assertNotEqual(self.proof()["generatedArtifactsFingerprint"], before)
+
+    def test_changed_canonical_source_is_refused(self):
+        (self.materialized / self.swift_paths[0]).write_text("// Altered source\n")
+        with self.assertRaises(producer.PairVerificationError): self.proof()
+
+    def test_unknown_generated_extra_is_refused(self):
+        (self.materialized / "Derived/Injected.swift").write_text("// Extra compile input\n")
+        with self.assertRaises(producer.PairVerificationError): self.proof()
+
+    def test_foreign_sources_reference_is_refused(self):
+        self.project["objects"]["F1"]["path"] = "/tmp/foreign.swift"
+        self.project["objects"]["F1"]["sourceTree"] = "<absolute>"
+        self.persist_project()
+        with self.assertRaises(producer.PairVerificationError): self.proof()
+
+    def test_omitted_canonical_source_is_refused(self):
+        self.project["objects"]["SOURCE"]["files"] = ["B1"]
+        self.persist_project()
+        with self.assertRaises(producer.PairVerificationError): self.proof()
+
+    def test_script_phase_is_refused(self):
+        self.project["objects"]["SCRIPT"] = {"isa": "PBXShellScriptBuildPhase", "shellScript": "true"}
+        self.project["objects"]["T"]["buildPhases"].append("SCRIPT")
+        self.persist_project()
+        with self.assertRaises(producer.PairVerificationError): self.proof()
+
+    def test_package_dependency_is_refused(self):
+        self.project["objects"]["T"]["packageProductDependencies"] = ["OTHER"]
+        self.persist_project()
+        with self.assertRaises(producer.PairVerificationError): self.proof()
+
+    def test_compiler_plugin_flag_is_refused(self):
+        self.project["objects"]["TD"]["buildSettings"]["OTHER_SWIFT_FLAGS"] = "$(inherited) -load-plugin-library /tmp/foreign.dylib"
+        self.persist_project()
+        with self.assertRaises(producer.PairVerificationError): self.proof()
+
+    def test_generated_info_cannot_inject_environment(self):
+        self.info["LSEnvironment"] = {"DYLD_INSERT_LIBRARIES": "/tmp/foreign.dylib"}
+        self.info_path.write_bytes(plistlib.dumps(self.info))
+        with self.assertRaises(producer.PairVerificationError): self.proof()
+
+    def test_generated_directory_symlink_is_refused(self):
+        external = self.root / "external"
+        external.mkdir()
+        self.info_path.rename(external / self.info_path.name)
+        self.info_path.parent.rmdir()
+        self.info_path.parent.symlink_to(external, target_is_directory=True)
+        with self.assertRaises(producer.PairVerificationError): self.proof()
 
 
 if __name__ == "__main__":
