@@ -29,8 +29,8 @@ def replace(path, old, new):
     path.write_text(text.replace(old, new))
 
 
-def archive(source, destination):
-    commit = git(source, "rev-parse", "HEAD").decode().strip()
+def archive(source, destination, revision="HEAD"):
+    commit = git(source, "rev-parse", revision + "^{commit}").decode().strip()
     data = git(source, "archive", commit)
     destination.mkdir()
     with tarfile.open(fileobj=io.BytesIO(data)) as content:
@@ -80,16 +80,33 @@ def materialize_gitlinks(source, stage, commit, output):
         object_source = local if local_root == local.resolve() else None
         if not metadata.exists():
             subprocess.run(["git", "init", "--bare", str(metadata)], check=True, capture_output=True)
+            private_hooks = metadata / "artifact-hooks"
+            private_hooks.mkdir(exist_ok=True)
             if object_source:
                 common = Path(git(local, "rev-parse", "--path-format=absolute", "--git-common-dir").decode().strip())
                 (metadata / "objects/info/alternates").write_text(str(common / "objects") + "\n")
             else:
                 url = git(source, "config", "--blob", commit + ":.gitmodules",
                           "--get", "submodule." + relative + ".url").decode().strip()
-                subprocess.run(["git", "--git-dir", str(metadata), "fetch", "--no-tags", url, revision],
+                subprocess.run(["git", "--git-dir", str(metadata), "-c", "core.hooksPath=" + str(metadata / "artifact-hooks"), "fetch", "--no-tags", url, revision],
                                check=True, capture_output=True)
-        archive_data = subprocess.run(["git", "--git-dir", str(metadata), "archive", revision],
-                                      check=True, capture_output=True).stdout
+        # An alternate cache can contain a commit but omit a reachable tree
+        # (for example a shallow/partial dependency checkout). Verify the full
+        # archive, then repair only our private metadata using a complete fetch.
+        archive_result = subprocess.run(["git", "--git-dir", str(metadata), "archive", revision], capture_output=True)
+        used_remote = object_source is None
+        if archive_result.returncode:
+            alternate = metadata / "objects/info/alternates"
+            if alternate.exists():
+                alternate.rename(alternate.with_name("alternates.disabled-for-exact-fetch"))
+            url = git(source, "config", "--blob", commit + ":.gitmodules",
+                      "--get", "submodule." + relative + ".url").decode().strip()
+            subprocess.run(["git", "--git-dir", str(metadata), "-c", "core.hooksPath=" + str(metadata / "artifact-hooks"), "-c", "fetch.negotiationAlgorithm=noop",
+                "fetch", "--refetch", "--depth", "1", "--no-tags", url, revision], check=True, capture_output=True)
+            used_remote = True
+            archive_result = subprocess.run(["git", "--git-dir", str(metadata), "archive", revision],
+                check=True, capture_output=True)
+        archive_data = archive_result.stdout
         if not destination.exists() or not any(destination.iterdir()):
             destination.mkdir(parents=True, exist_ok=True)
             with tarfile.open(fileobj=io.BytesIO(archive_data)) as content:
@@ -107,18 +124,56 @@ def materialize_gitlinks(source, stage, commit, output):
         records.append({"path": relative, "commit": revision,
                         "tree": git(destination, "rev-parse", revision + "^{tree}").decode().strip(),
                         "archiveSHA256": hashlib.sha256(archive_data).hexdigest(),
-                        "source": "local-immutable-git-object" if object_source else "private-exact-object-fetch",
+                        "source": "private-exact-object-fetch" if used_remote else "local-immutable-git-object",
                         "workingTreeClean": True})
     return records
 
 
-def copy_additions(source, stage, paths):
+def copy_additions(source, stage, paths, revision="HEAD"):
+    commit = git(source, "rev-parse", revision + "^{commit}").decode().strip()
     for path in paths:
         destination = stage / path
         destination.parent.mkdir(parents=True, exist_ok=True)
-        original = source / path
-        if not original.exists(): original = source / "integrations/native-sidebar-parity" / path
-        shutil.copy2(original, destination)
+        try:
+            content = git(source, "show", commit + ":" + path)
+        except subprocess.CalledProcessError:
+            content = git(source, "show", commit + ":integrations/native-sidebar-parity/" + path)
+        destination.write_bytes(content)
+        record = git(source, "ls-tree", commit, "--", path).decode().split()
+        destination.chmod(0o755 if record and record[0] == "100755" else 0o644)
+
+
+def hydrate_integrated_cortex(source, stage, revision):
+    """Complete only the two committed leaf dependencies of existing parity.
+
+    A source archive contains no generated additions. Newer integrated callers
+    still reference these older payload leaves; read their exact Git objects
+    rather than copying an owner's checkout or applying historical anchors.
+    """
+    commit = git(source, "rev-parse", revision + "^{commit}").decode().strip()
+    records = []
+    for path in ["Sources/CortexSessionsExtension/NativeWorkspaceParityMenu.swift",
+                 "Sources/CortexSessionsExtension/SidebarManualTagPicker.swift"]:
+        source_path = path
+        try:
+            content = git(source, "show", commit + ":" + source_path)
+        except subprocess.CalledProcessError:
+            source_path = "integrations/native-sidebar-parity/" + path
+            content = git(source, "show", commit + ":" + source_path)
+        destination = stage / path
+        if destination.is_symlink():
+            raise ValueError("Integrated component is a symlink: " + path)
+        if destination.exists():
+            if destination.read_bytes() != content:
+                raise ValueError("Integrated component differs from immutable source: " + path)
+        else:
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            destination.write_bytes(content)
+            destination.chmod(0o644)
+        records.append({"path": path, "sourcePath": source_path,
+                        "sourceCommit": commit,
+                        "sha256": hashlib.sha256(content).hexdigest()})
+    return records
 
 
 def main():
@@ -128,15 +183,28 @@ def main():
     parser.add_argument("--cmux-additions", type=Path, required=True)
     parser.add_argument("--cortex-additions", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--cmux-commit", required=True)
+    parser.add_argument("--cortex-commit", required=True)
+    parser.add_argument("--cmux-additions-commit", required=True)
+    parser.add_argument("--cortex-additions-commit", required=True)
+    parser.add_argument("--search-only", action="store_true", help="Isolated installed-SDK folder-search canary, without new native actions")
+    parser.add_argument("--search-build-config-commit", help="Exact canonical Cortex isolated build configuration source")
+    parser.add_argument("--integrated-bases", action="store_true", help="Verify existing parity in exact source objects instead of applying old anchors")
     parser.add_argument("--reuse-existing", action="store_true")
     args = parser.parse_args()
     output = args.output.resolve()
+    for revision in [args.cmux_commit, args.cortex_commit, args.cmux_additions_commit, args.cortex_additions_commit]:
+        if len(revision) != 40 or any(char not in "0123456789abcdef" for char in revision):
+            raise ValueError("Every base and additions revision must be an exact immutable commit")
+    addition_heads = {"cmux": args.cmux_additions_commit, "Cortex": args.cortex_additions_commit}
     if args.reuse_existing:
         previous = json.loads((output / "receipt.json").read_text())
         if previous.get("productionActivationAllowed") is not False or previous.get("sourceArchivesIncludeForeignWIP") is not False:
             raise ValueError("Only an isolated immutable source artifact can be reused")
         cmux, cortex = output / "cmux", output / "Cortex"
         cmux_sha, cortex_sha = previous["cmuxBaseSHA"], previous["cortexBaseSHA"]
+        if cmux_sha != args.cmux_commit or cortex_sha != args.cortex_commit:
+            raise ValueError("Artifact reuse cannot replace immutable source identities")
         paths = {
             cmux: ["Packages/macOS/CmuxExtensionKit/Sources/CmuxExtensionKit/Manifest/CMUXExtensionScope.swift", "Packages/macOS/CmuxExtensionKit/Sources/CmuxExtensionKit/Sidebar/CMUXSidebarAction.swift", "Packages/macOS/CmuxExtensionKit/Sources/CmuxExtensionKit/Sidebar/CmuxSidebarHost.swift", "Packages/macOS/CmuxExtensionKit/Sources/CmuxExtensionKit/Sidebar/CMUXSidebarSnapshot.swift", "Sources/ContentView.swift", "cmux.xcodeproj/project.pbxproj", "Sources/SidebarExtensionManagementCoordinator.swift", "Sources/Sidebar/AppKitList/Cells/SidebarGroupHeaderRowView.swift", "Sources/Sidebar/AppKitList/Cells/SidebarWorkspaceRowCommands.swift"],
             cortex: ["Sources/CortexSessionsExtension/CortexSessionsExtension.swift", "Sources/CortexSessionsExtension/SessionsSidebarModel.swift", "Sources/CortexSessionsExtension/SidebarRootView.swift", "Sources/CortexSessionsExtension/CompactWorkspaceRowView.swift", "Sources/CortexSessionsExtension/SidebarChrome.swift", "scripts/verify-sidebar-layout.sh", "Project.swift"]}
@@ -148,109 +216,156 @@ def main():
     else:
         output.mkdir(parents=True, exist_ok=False)
         cmux, cortex = output / "cmux", output / "Cortex"
-        cmux_sha = archive(args.cmux_base, cmux)
-        cortex_sha = archive(args.cortex_base, cortex)
+        cmux_sha = archive(args.cmux_base, cmux, args.cmux_commit)
+        cortex_sha = archive(args.cortex_base, cortex, args.cortex_commit)
         make_snapshot_repository(cmux, args.cmux_base, cmux_sha)
         make_snapshot_repository(cortex, args.cortex_base, cortex_sha)
     gitlinks = materialize_gitlinks(args.cmux_base, cmux, cmux_sha, output)
-    copy_additions(args.cmux_additions, cmux, [
-        "Sources/SidebarClassicMenuParity.swift", "Sources/SidebarExtensionClassicMenuCoordinator.swift",
-        "Packages/macOS/CmuxExtensionKit/Sources/CmuxExtensionKit/Sidebar/CmuxSidebarClassicMenu.swift",
-        "tests_v2/test_cortex_classic_menu_contract.py", "tests_v2/test_cortex_classic_parity.py"])
-    copy_additions(args.cortex_additions, cortex, [
-        "Sources/SessionsContract/SidebarNativeStatusPresentation.swift",
-        "Sources/SessionsContract/SidebarCanonicalTagCatalog.swift",
-        "Sources/CortexSessionsExtension/NativeWorkspaceParityMenu.swift",
-        "Sources/CortexSessionsExtension/SidebarManualTagPicker.swift",
-        "Sources/CortexSessionsExtension/Resources/CanonicalSessionTags.json",
-        "Tests/DomainTests/SessionsFeed/SidebarNativeParityTests.swift",
-        "scripts/project-sidebar-tag-catalog.py", "scripts/tests/test_sidebar_native_parity.py"])
+    integrated_leaves = []
+    if args.search_only:
+        if args.integrated_bases or args.reuse_existing:
+            raise ValueError("Search-only canary requires a fresh isolated archive")
+        configuration = args.search_build_config_commit
+        if not configuration or len(configuration) != 40 or any(c not in "0123456789abcdef" for c in configuration):
+            raise ValueError("Search-only canary requires exact canonical build configuration commit")
+        if "matchingMemberIds" not in (cortex / "Sources/SessionsContract/SidebarModel.swift").read_text():
+            raise ValueError("Search-only canary source does not contain the reviewed membership fix")
+        current_project = git(args.cortex_base, "show", configuration + ":Project.swift").decode()
+        prelude = current_project.partition("let project = Project(")[0]
+        if 'Dogfood must be paired to an explicit isolated CMUX extension point' not in prelude:
+            raise ValueError("Canonical isolated build configuration guard missing")
+        project = cortex / "Project.swift"
+        old = project.read_text()
+        old = old.replace('import ProjectDescription\n', prelude, 1)
+        old = old.replace('bundleId: "fr.yoyaku.cortex",', 'bundleId: cortexMainIdentifier,')
+        old = old.replace('bundleId: "fr.yoyaku.cortex.sessions",', 'bundleId: cortexExtensionIdentifier,')
+        old = old.replace('infoPlist: .file(path: "Sources/App/Info.plist"),', 'infoPlist: .file(path: .relativeToRoot(cortexMainInfoPath)),')
+        old = old.replace('"PRODUCT_NAME": "Cortex",', '"PRODUCT_NAME": .string(cortexMainProductName),')
+        old = old.replace('"CFBundleDisplayName": "Cortex Sessions",', '"CFBundleDisplayName": .string(cortexExtensionDisplayName),\n                "CortexSessionsExtensionIdentifier": .string(cortexExtensionIdentifier),')
+        old = old.replace('"CMUX_SIDEBAR_EXTENSION_POINT_ID": "com.cmuxterm.app.cmux.sidebar",', '"CMUX_SIDEBAR_EXTENSION_POINT_ID": .string(cortexProductionSidebarPoint),')
+        old = old.replace('"PRODUCT_BUNDLE_IDENTIFIER": "fr.yoyaku.cortex.sessions.debug",', '"PRODUCT_BUNDLE_IDENTIFIER": .string(cortexDogfood ? cortexExtensionIdentifier : "fr.yoyaku.cortex.sessions.debug"),')
+        old = old.replace('"CMUX_SIDEBAR_EXTENSION_POINT_ID": "fr.yoyaku.cortex.development.sidebar",', '"CMUX_SIDEBAR_EXTENSION_POINT_ID": .string(cortexDebugSidebarPoint),')
+        project.write_text(old)
+        copy_additions(args.cortex_base, cortex, ["Sources/App/CortexMain.swift", "scripts/build-sidebar-dogfood.sh"], configuration)
+        replace(cortex / "Sources/App/CortexApp.swift", "@main\nstruct CortexApp:", "struct CortexApp:")
+        # The copied producer keeps isolation and normal signing; its receipt
+        # must honestly describe this old SDK rather than claiming API 2.3.
+        replace(cortex / "scripts/build-sidebar-dogfood.sh", "'cmuxAPIMinimum':'2.3'", "'cmuxAPIMinimum':'2.0'")
+    elif args.integrated_bases:
+        integrated_leaves = hydrate_integrated_cortex(args.cortex_base, cortex, cortex_sha)
+        markers = {
+            cmux / "Sources/ContentView.swift": "SidebarExtensionClassicMenuCoordinator",
+            cmux / "Packages/macOS/CmuxExtensionKit/Sources/CmuxExtensionKit/Sidebar/CMUXSidebarAction.swift": "case classicMenu(",
+            cmux / "Packages/macOS/CmuxExtensionKit/Sources/CmuxExtensionKit/Manifest/CMUXExtensionScope.swift": "case presentNativeSidebarMenu",
+            cortex / "Sources/CortexSessionsExtension/CortexSessionsExtension.swift": ".presentNativeSidebarMenu",
+            cortex / "Sources/CortexSessionsExtension/SessionsSidebarModel.swift": "manualTagRequest",
+            cortex / "Sources/CortexSessionsExtension/SidebarRootView.swift": "SidebarManualTagPicker",
+        }
+        for path, marker in markers.items():
+            if marker not in path.read_text():
+                raise ValueError("Integrated immutable baseline lacks parity marker: " + str(path))
+    else:
+        copy_additions(args.cmux_additions, cmux, [
+            "Sources/SidebarClassicMenuParity.swift", "Sources/SidebarExtensionClassicMenuCoordinator.swift",
+            "Packages/macOS/CmuxExtensionKit/Sources/CmuxExtensionKit/Sidebar/CmuxSidebarClassicMenu.swift",
+            "tests_v2/test_cortex_classic_menu_contract.py", "tests_v2/test_cortex_classic_parity.py"], args.cmux_additions_commit)
+        copy_additions(args.cortex_additions, cortex, [
+            "Sources/SessionsContract/SidebarNativeStatusPresentation.swift",
+            "Sources/SessionsContract/SidebarCanonicalTagCatalog.swift",
+            "Sources/CortexSessionsExtension/NativeWorkspaceParityMenu.swift",
+            "Sources/CortexSessionsExtension/SidebarManualTagPicker.swift",
+            "Sources/CortexSessionsExtension/Resources/CanonicalSessionTags.json",
+            "Tests/DomainTests/SessionsFeed/SidebarNativeParityTests.swift",
+            "scripts/project-sidebar-tag-catalog.py", "scripts/tests/test_sidebar_native_parity.py"], args.cortex_additions_commit)
 
-    sdk = cmux / "Packages/macOS/CmuxExtensionKit/Sources/CmuxExtensionKit"
-    # The scope presents the host menu. It does not let an extension choose
-    # an item or invoke a hidden command from that menu.
-    permissions = sdk / "Manifest/CMUXExtensionScope.swift"
-    replace(permissions, "    case bindAgentSession\n", "    case bindAgentSession\n    /// Present the native classic sidebar menu; choices remain user gestures.\n    case presentNativeSidebarMenu\n")
-    replace(permissions, "        case .analyzeWorkspaceContext:\n", "        case .presentNativeSidebarMenu:\n            return .sidebarV2_3\n        case .analyzeWorkspaceContext:\n")
-    action = sdk / "Sidebar/CMUXSidebarAction.swift"
-    replace(action, "    public var requiredScopes:", "    /// Presents the existing host menu; cannot choose a native command.\n    case classicMenu(CmuxSidebarClassicMenuAction)\n\n    public var requiredScopes:")
-    replace(action, "        switch self {\n", "        switch self {\n        case .classicMenu:\n            return [.presentNativeSidebarMenu]\n")
-    host = sdk / "Sidebar/CmuxSidebarHost.swift"
-    replace(host, "    /// Requests the latest sidebar snapshot", "    /// Presents an exact native sidebar menu through the existing reply gate.\n    public func performClassicMenu(_ action: CmuxSidebarClassicMenuAction) async throws {\n        try await send(.classicMenu(action))\n    }\n\n    /// Requests the latest sidebar snapshot")
-    group = cmux / "Sources/Sidebar/AppKitList/Cells/SidebarGroupHeaderRowView.swift"
-    replace(group, "    private func makeHeaderMenu() -> NSMenu {", "    /// Shared by classic cells and typed extension menu presentation.\n    func makeHeaderMenu() -> NSMenu {")
-    commands = cmux / "Sources/Sidebar/AppKitList/Cells/SidebarWorkspaceRowCommands.swift"
-    replace(commands, "    func closeTabs(_ targetIds: [UUID], allowPinned: Bool) {", "    /// Captured at menu-open time; no live relative-index recapture.\n    func closeCapturedPlan(_ plan: SidebarClassicMenuParity.ClosePlan) {\n        guard let tabManager, tabManager.tabs.contains(where: { $0.id == plan.anchorID }) else { return }\n        let ids = plan.survivingWorkspaceIDs(in: tabManager.tabs.map(\\.id))\n        guard !ids.isEmpty else { return }\n        closeTabs(ids, allowPinned: true)\n    }\n\n    func closeTabs(_ targetIds: [UUID], allowPinned: Bool) {")
-    replace(commands, "    private func addCloseItems(to menu: NSMenu, tabManager: TabManager) {", "    private func addCloseItems(to menu: NSMenu, tabManager: TabManager) {\n        guard let captured = SidebarClassicMenuParity(nativeOrder: tabManager.tabs.map(\\.id),\n            anchorID: commands.tab.id, selectedWorkspaceIDs: commands.contextMenuWorkspaceIds) else { return }\n        let selected = captured.closePlan(.selected), others = captured.closePlan(.others)\n        let above = captured.closePlan(.above), below = captured.closePlan(.below)")
-    replace(commands, "            commands.closeTabs(commands.contextMenuWorkspaceIds, allowPinned: true)", "            commands.closeCapturedPlan(selected)")
-    replace(commands, "            enabled: !(tabManager.tabs.count <= 1 || targetIds.count == tabManager.tabs.count)\n        ) { [weak tabManager, commands] in\n            guard let tabManager else { return }\n            let keepIds = Set(commands.contextMenuWorkspaceIds)\n            let idsToClose = tabManager.tabs.compactMap { keepIds.contains($0.id) ? nil : $0.id }\n            commands.closeTabs(idsToClose, allowPinned: true)", "            enabled: !others.workspaceIDs.isEmpty\n        ) { [commands] in\n            commands.closeCapturedPlan(others)")
-    replace(commands, "            enabled: commands.index < tabManager.tabs.count - 1\n        ) { [weak tabManager, commands] in\n            guard let tabManager,\n                  let anchorIndex = tabManager.tabs.firstIndex(where: { $0.id == commands.tab.id }) else { return }\n            let idsToClose = tabManager.tabs.suffix(from: anchorIndex + 1).map { $0.id }\n            commands.closeTabs(idsToClose, allowPinned: true)", "            enabled: !below.workspaceIDs.isEmpty\n        ) { [commands] in\n            commands.closeCapturedPlan(below)")
-    replace(commands, "            enabled: commands.index != 0\n        ) { [weak tabManager, commands] in\n            guard let tabManager,\n                  let anchorIndex = tabManager.tabs.firstIndex(where: { $0.id == commands.tab.id }) else { return }\n            let idsToClose = tabManager.tabs.prefix(upTo: anchorIndex).map { $0.id }\n            commands.closeTabs(idsToClose, allowPinned: true)", "            enabled: !above.workspaceIDs.isEmpty\n        ) { [commands] in\n            commands.closeCapturedPlan(above)")
-    view = cmux / "Sources/ContentView.swift"
-    replace(view, "actionHandler: { await handleCMUXSidebarExtensionAction($0) },", "actionHandler: { await handleCMUXSidebarExtensionAction($0, renderContext: renderContext) },")
-    replace(view, "        _ action: CmuxSidebarAction\n    ) async -> CmuxSidebarActionResult {", "        _ action: CmuxSidebarAction,\n        renderContext: WorkspaceListRenderContext\n    ) async -> CmuxSidebarActionResult {\n        if case .classicMenu(let request) = action {\n            return SidebarExtensionClassicMenuCoordinator(\n                tabManager: tabManager, notificationStore: notificationStore,\n                colorScheme: renderContext.environment.colorScheme,\n                readSelectedIDs: { selectedTabIds }, writeSelectedIDs: { selectedTabIds = $0 },\n                readSelectionIndex: { lastSidebarSelectionIndex }, writeSelectionIndex: { lastSidebarSelectionIndex = $0 },\n                selectTabs: { selection = .tabs }, refreshSnapshot: { refreshExtensionSidebarSnapshot() },\n                groupConfiguration: { id in appKitWorkspaceTableRows(renderContext: renderContext).first { $0.groupId == id && $0.isGroupHeader } }\n            ).perform(request)\n        }")
+        sdk = cmux / "Packages/macOS/CmuxExtensionKit/Sources/CmuxExtensionKit"
+        # The scope presents the host menu. It does not let an extension choose
+        # an item or invoke a hidden command from that menu.
+        permissions = sdk / "Manifest/CMUXExtensionScope.swift"
+        replace(permissions, "    case bindAgentSession\n", "    case bindAgentSession\n    /// Present the native classic sidebar menu; choices remain user gestures.\n    case presentNativeSidebarMenu\n")
+        replace(permissions, "        case .analyzeWorkspaceContext:\n", "        case .presentNativeSidebarMenu:\n            return .sidebarV2_3\n        case .analyzeWorkspaceContext:\n")
+        action = sdk / "Sidebar/CMUXSidebarAction.swift"
+        replace(action, "    public var requiredScopes:", "    /// Presents the existing host menu; cannot choose a native command.\n    case classicMenu(CmuxSidebarClassicMenuAction)\n\n    public var requiredScopes:")
+        replace(action, "        switch self {\n", "        switch self {\n        case .classicMenu:\n            return [.presentNativeSidebarMenu]\n")
+        host = sdk / "Sidebar/CmuxSidebarHost.swift"
+        replace(host, "    /// Requests the latest sidebar snapshot", "    /// Presents an exact native sidebar menu through the existing reply gate.\n    public func performClassicMenu(_ action: CmuxSidebarClassicMenuAction) async throws {\n        try await send(.classicMenu(action))\n    }\n\n    /// Requests the latest sidebar snapshot")
+        group = cmux / "Sources/Sidebar/AppKitList/Cells/SidebarGroupHeaderRowView.swift"
+        replace(group, "    private func makeHeaderMenu() -> NSMenu {", "    /// Shared by classic cells and typed extension menu presentation.\n    func makeHeaderMenu() -> NSMenu {")
+        commands = cmux / "Sources/Sidebar/AppKitList/Cells/SidebarWorkspaceRowCommands.swift"
+        replace(commands, "    func closeTabs(_ targetIds: [UUID], allowPinned: Bool) {", "    /// Captured at menu-open time; no live relative-index recapture.\n    func closeCapturedPlan(_ plan: SidebarClassicMenuParity.ClosePlan) {\n        guard let tabManager, tabManager.tabs.contains(where: { $0.id == plan.anchorID }) else { return }\n        let ids = plan.survivingWorkspaceIDs(in: tabManager.tabs.map(\\.id))\n        guard !ids.isEmpty else { return }\n        closeTabs(ids, allowPinned: true)\n    }\n\n    func closeTabs(_ targetIds: [UUID], allowPinned: Bool) {")
+        replace(commands, "    private func addCloseItems(to menu: NSMenu, tabManager: TabManager) {", "    private func addCloseItems(to menu: NSMenu, tabManager: TabManager) {\n        guard let captured = SidebarClassicMenuParity(nativeOrder: tabManager.tabs.map(\\.id),\n            anchorID: commands.tab.id, selectedWorkspaceIDs: commands.contextMenuWorkspaceIds) else { return }\n        let selected = captured.closePlan(.selected), others = captured.closePlan(.others)\n        let above = captured.closePlan(.above), below = captured.closePlan(.below)")
+        replace(commands, "            commands.closeTabs(commands.contextMenuWorkspaceIds, allowPinned: true)", "            commands.closeCapturedPlan(selected)")
+        replace(commands, "            enabled: !(tabManager.tabs.count <= 1 || targetIds.count == tabManager.tabs.count)\n        ) { [weak tabManager, commands] in\n            guard let tabManager else { return }\n            let keepIds = Set(commands.contextMenuWorkspaceIds)\n            let idsToClose = tabManager.tabs.compactMap { keepIds.contains($0.id) ? nil : $0.id }\n            commands.closeTabs(idsToClose, allowPinned: true)", "            enabled: !others.workspaceIDs.isEmpty\n        ) { [commands] in\n            commands.closeCapturedPlan(others)")
+        replace(commands, "            enabled: commands.index < tabManager.tabs.count - 1\n        ) { [weak tabManager, commands] in\n            guard let tabManager,\n                  let anchorIndex = tabManager.tabs.firstIndex(where: { $0.id == commands.tab.id }) else { return }\n            let idsToClose = tabManager.tabs.suffix(from: anchorIndex + 1).map { $0.id }\n            commands.closeTabs(idsToClose, allowPinned: true)", "            enabled: !below.workspaceIDs.isEmpty\n        ) { [commands] in\n            commands.closeCapturedPlan(below)")
+        replace(commands, "            enabled: commands.index != 0\n        ) { [weak tabManager, commands] in\n            guard let tabManager,\n                  let anchorIndex = tabManager.tabs.firstIndex(where: { $0.id == commands.tab.id }) else { return }\n            let idsToClose = tabManager.tabs.prefix(upTo: anchorIndex).map { $0.id }\n            commands.closeTabs(idsToClose, allowPinned: true)", "            enabled: !above.workspaceIDs.isEmpty\n        ) { [commands] in\n            commands.closeCapturedPlan(above)")
+        view = cmux / "Sources/ContentView.swift"
+        replace(view, "actionHandler: { await handleCMUXSidebarExtensionAction($0) },", "actionHandler: { await handleCMUXSidebarExtensionAction($0, renderContext: renderContext) },")
+        replace(view, "        _ action: CmuxSidebarAction\n    ) async -> CmuxSidebarActionResult {", "        _ action: CmuxSidebarAction,\n        renderContext: WorkspaceListRenderContext\n    ) async -> CmuxSidebarActionResult {\n        if case .classicMenu(let request) = action {\n            return SidebarExtensionClassicMenuCoordinator(\n                tabManager: tabManager, notificationStore: notificationStore,\n                colorScheme: renderContext.environment.colorScheme,\n                readSelectedIDs: { selectedTabIds }, writeSelectedIDs: { selectedTabIds = $0 },\n                readSelectionIndex: { lastSidebarSelectionIndex }, writeSelectionIndex: { lastSidebarSelectionIndex = $0 },\n                selectTabs: { selection = .tabs }, refreshSnapshot: { refreshExtensionSidebarSnapshot() },\n                groupConfiguration: { id in appKitWorkspaceTableRows(renderContext: renderContext).first { $0.groupId == id && $0.isGroupHeader } }\n            ).perform(request)\n        }")
 
-    project = cmux / "cmux.xcodeproj/project.pbxproj"
-    project_text = project.read_text()
-    for name in ["SidebarClassicMenuParity.swift", "SidebarExtensionClassicMenuCoordinator.swift"]:
-        reference = hashlib.sha256(("ceo-parity-ref:" + name).encode()).hexdigest()[:24].upper()
-        build = hashlib.sha256(("ceo-parity-build:" + name).encode()).hexdigest()[:24].upper()
-        project_text = project_text.replace("/* End PBXBuildFile section */", f"\t\t{build} /* {name} in Sources */ = {{isa = PBXBuildFile; fileRef = {reference} /* {name} */; }};\n/* End PBXBuildFile section */")
-        project_text = project_text.replace("/* End PBXFileReference section */", f'\t\t{reference} /* {name} */ = {{isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = {name}; sourceTree = "<group>"; }};\n/* End PBXFileReference section */')
-        project_text = project_text.replace("\t\t\t\t499A3CA2EB3580820BEBDCBC /* SidebarExtensionManagementCoordinator.swift */,", f"\t\t\t\t{reference} /* {name} */,\n\t\t\t\t499A3CA2EB3580820BEBDCBC /* SidebarExtensionManagementCoordinator.swift */,")
-        project_text = project_text.replace("\t\t\t\tC14BB250731A62C3CC38C034 /* SidebarExtensionManagementCoordinator.swift in Sources */,", f"\t\t\t\t{build} /* {name} in Sources */,\n\t\t\t\tC14BB250731A62C3CC38C034 /* SidebarExtensionManagementCoordinator.swift in Sources */,")
-        if project_text.count(reference) != 3 or project_text.count(build) != 2: raise ValueError("Native source project wiring changed")
-    project.write_text(project_text)
+        project = cmux / "cmux.xcodeproj/project.pbxproj"
+        project_text = project.read_text()
+        for name in ["SidebarClassicMenuParity.swift", "SidebarExtensionClassicMenuCoordinator.swift"]:
+            reference = hashlib.sha256(("ceo-parity-ref:" + name).encode()).hexdigest()[:24].upper()
+            build = hashlib.sha256(("ceo-parity-build:" + name).encode()).hexdigest()[:24].upper()
+            project_text = project_text.replace("/* End PBXBuildFile section */", f"\t\t{build} /* {name} in Sources */ = {{isa = PBXBuildFile; fileRef = {reference} /* {name} */; }};\n/* End PBXBuildFile section */")
+            project_text = project_text.replace("/* End PBXFileReference section */", f'\t\t{reference} /* {name} */ = {{isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = {name}; sourceTree = "<group>"; }};\n/* End PBXFileReference section */')
+            project_text = project_text.replace("\t\t\t\t499A3CA2EB3580820BEBDCBC /* SidebarExtensionManagementCoordinator.swift */,", f"\t\t\t\t{reference} /* {name} */,\n\t\t\t\t499A3CA2EB3580820BEBDCBC /* SidebarExtensionManagementCoordinator.swift */,")
+            project_text = project_text.replace("\t\t\t\tC14BB250731A62C3CC38C034 /* SidebarExtensionManagementCoordinator.swift in Sources */,", f"\t\t\t\t{build} /* {name} in Sources */,\n\t\t\t\tC14BB250731A62C3CC38C034 /* SidebarExtensionManagementCoordinator.swift in Sources */,")
+            if project_text.count(reference) != 3 or project_text.count(build) != 2: raise ValueError("Native source project wiring changed")
+        project.write_text(project_text)
 
-    extension = cortex / "Sources/CortexSessionsExtension"
-    manifest = extension / "CortexSessionsExtension.swift"
-    replace(manifest, ".colorWorkspace, .reorderWorkspace, .editWorkspaceContext, .analyzeWorkspaceContext, .bindAgentSession],", ".colorWorkspace, .reorderWorkspace, .editWorkspaceContext, .analyzeWorkspaceContext, .bindAgentSession, .presentNativeSidebarMenu],")
-    model = extension / "SessionsSidebarModel.swift"
-    replace(model, "import CmuxExtensionKit\n", "import AppKit\nimport CmuxExtensionKit\n")
-    replace(model, "    var editor: SidebarEditorRequest?\n", "    var editor: SidebarEditorRequest?\n    var manualTagRequest: SidebarManualTagRequest?\n    var selectedWorkspaceIDs = Set<UUID>()\n    private var selectionAnchorID: UUID?\n    @ObservationIgnored let tagCatalog: SidebarCanonicalTagCatalog? = {\n        guard let url = Bundle.main.url(forResource: \"CanonicalSessionTags\", withExtension: \"json\"),\n              let data = try? Data(contentsOf: url) else { return nil }\n        return try? SidebarCanonicalTagCatalog.decode(data)\n    }()\n")
-    replace(model, "        snapshot = incoming\n", "        snapshot = incoming\n        selectedWorkspaceIDs.formIntersection(Set(incoming.workspaces.map(\\.id)))\n")
-    replace(model, "        let surface = surfaceId.flatMap(UUID.init(uuidString:))\n", "        let surface = surfaceId.flatMap(UUID.init(uuidString:))\n        if surface == nil {\n            let modifiers = NSEvent.modifierFlags\n            let order = snapshot?.workspaces.map(\\.id) ?? []\n            if modifiers.contains(.shift), let anchor = selectionAnchorID,\n               let from = order.firstIndex(of: anchor), let to = order.firstIndex(of: id) {\n                selectedWorkspaceIDs = Set(order[min(from, to)...max(from, to)])\n            } else if modifiers.contains(.command) {\n                if selectedWorkspaceIDs.contains(id) { selectedWorkspaceIDs.remove(id) }\n                else { selectedWorkspaceIDs.insert(id) }\n                selectionAnchorID = id\n            } else { selectedWorkspaceIDs = [id]; selectionAnchorID = id }\n        }\n")
-    root = extension / "SidebarRootView.swift"
-    replace(root, "        .sheet(item: $model.editor)", "        .sheet(item: $model.manualTagRequest) { request in\n            if let catalog = model.tagCatalog {\n                SidebarManualTagPicker(request: request, catalog: catalog, model: model, onClose: {\n                    if model.manualTagRequest?.id == request.id { model.manualTagRequest = nil }\n                })\n            }\n        }\n        .sheet(item: $model.editor)")
-    replace(root, "                    isOrganizing: model.isOrganizing)", "                    onManualTag: model.allows(.editWorkspaceContext) && model.tagCatalog != nil ? {\n                        guard let snapshot = model.snapshot, let windowID = snapshot.windowID,\n                              let id = snapshot.selectedWorkspaceID, let workspace = model.workspace(id.uuidString) else { return }\n                        model.manualTagRequest = .init(workspaceID: id, windowID: windowID, revision: workspace.context?.revision ?? 0)\n                    } : nil,\n                    isOrganizing: model.isOrganizing)")
-    replace(root, ".contextMenu { FolderActionsMenu(groupID: section.id, model: model) }", ".contextMenu { if !model.allows(.presentNativeSidebarMenu) { FolderActionsMenu(groupID: section.id, model: model) } }\n                                .overlay {\n                                    if model.allows(.presentNativeSidebarMenu), let id = model.group(section.id)?.id {\n                                        NativeWorkspaceParityMenu { model.perform(\"Menu natif indisponible\") { try await $0.performClassicMenu(.presentGroupMenu(groupID: id)) } }\n                                    }\n                                }")
-    replace(root, "workspaceMenu: AnyView(WorkspaceActionsMenu(workspaceID: row.id, model: model)),", "workspaceMenu: AnyView(Group { if !model.allows(.presentNativeSidebarMenu) { WorkspaceActionsMenu(workspaceID: row.id, model: model) } }),\n                                    onNativeContextMenu: model.allows(.presentNativeSidebarMenu) ? {\n                                        guard let id = UUID(uuidString: row.id) else { return }\n                                        let targets = (model.snapshot?.workspaces ?? []).compactMap { model.selectedWorkspaceIDs.contains($0.id) ? $0.id : nil }\n                                        model.perform(\"Menu natif indisponible\") { try await $0.performClassicMenu(.presentWorkspaceMenu(workspaceID: id, selectedWorkspaceIDs: targets)) }\n                                    } : nil,")
-    replace(root, "sidebarWidth: sidebarWidth\n", "sidebarWidth: sidebarWidth,\n                                    isMultiSelected: UUID(uuidString: row.id).map(model.selectedWorkspaceIDs.contains) ?? false\n")
-    chrome = extension / "SidebarChrome.swift"
-    replace(chrome, "    var isOrganizing = false", "    var onManualTag: (() -> Void)? = nil\n    var isOrganizing = false")
-    replace(chrome, "                    if let onOrganize {", "                    if let onManualTag {\n                        Section(\"Classification\") { Button(\"Ajouter une classification au projet sélectionné…\", action: onManualTag) }\n                    }\n                    if let onOrganize {")
-    row = extension / "CompactWorkspaceRowView.swift"
-    replace(row, "    var workspaceMenu: AnyView? = nil\n", "    var workspaceMenu: AnyView? = nil\n    var onNativeContextMenu: (() -> Void)? = nil\n")
-    replace(row, "    var sidebarWidth: CGFloat? = nil\n", "    var sidebarWidth: CGFloat? = nil\n    var isMultiSelected = false\n")
-    replace(row, '.accessibilityIdentifier("workspace:\\(row.id)")', '.overlay { if let onNativeContextMenu { NativeWorkspaceParityMenu(onPresent: onNativeContextMenu) } }\n                .accessibilityIdentifier("workspace:\\(row.id)")')
-    replace(row, ".background(row.workspace.isSelected ? SidebarPalette.accent.opacity(0.10)", ".background(row.workspace.isSelected || isMultiSelected ? SidebarPalette.accent.opacity(0.10)")
-    replace(row, "        Circle().fill(badge == .unknown ? Color.clear : SidebarActivityPresentation.color(badge))", "        Image(systemName: SidebarNativeStatusPresentation(badge: badge).activitySymbol)\n            .font(.system(size: 7, weight: .semibold))\n            .foregroundStyle(SidebarActivityPresentation.color(badge))")
-    replace(row, "            .overlay { if badge == .unknown { Circle().stroke(SidebarPalette.secondary, lineWidth: 1) } }\n", "")
-    replace(row, "            .help(badge.label).accessibilityLabel(badge.label)", "            .help(SidebarNativeStatusPresentation(badge: badge).activityLabel)\n            .accessibilityLabel(SidebarNativeStatusPresentation(badge: badge).activityLabel)")
-    replace(row, "SidebarActivityDot(badge: group.sessions.contains(where: \\.hasPendingUserAction) ? .needsInput : groupBadge)", "SidebarActivityDot(badge: groupBadge, pendingUserActionCount: group.sessions.filter(\\.hasPendingUserAction).count)")
-    replace(row, "SidebarActivityDot(badge: session.hasPendingUserAction ? .needsInput : session.badge)", "SidebarActivityDot(badge: session.badge, pendingUserActionCount: session.pendingUserActionCount)")
-    replace(row, "private struct SidebarActivityDot: View {\n    let badge: SidebarBadge", "private struct SidebarActivityDot: View {\n    let badge: SidebarBadge\n    var pendingUserActionCount: Int = 0")
-    replace(row, "            .background(SidebarPalette.background, in: Circle())", "            .background(SidebarPalette.background, in: Circle())\n            .overlay(alignment: .bottomTrailing) {\n                if pendingUserActionCount > 0 && badge != .needsInput && badge != .planAwaitingValidation {\n                    Image(systemName: \"bell.fill\").font(.system(size: 5, weight: .semibold))\n                        .foregroundStyle(CortexVisualTokens.warning).offset(x: 2, y: 4)\n                        .accessibilityLabel(\"Needs input\")\n                }\n            }")
-    row.write_text(row.read_text().replace("session.badge.label", "SidebarNativeStatusPresentation(badge: session.badge).activityLabel"))
-    layout = cortex / "scripts/verify-sidebar-layout.sh"
-    replace(layout, "    cat Sources/SessionsContract/SidebarAgentObservation.swift", "    cat Sources/SessionsContract/SidebarNativeStatusPresentation.swift\n    cat Sources/SessionsContract/SidebarAgentObservation.swift")
-    replace(layout, "    sed '/^import SessionsContract$/d' Sources/CortexSessionsExtension/CompactWorkspaceRowView.swift", "    cat Sources/CortexSessionsExtension/NativeWorkspaceParityMenu.swift\n    sed '/^import SessionsContract$/d' Sources/CortexSessionsExtension/CompactWorkspaceRowView.swift")
-    project = cortex / "Project.swift"
-    replace(project, 'resources: ["Sources/App/Resources/Assets.xcassets"],', 'resources: ["Sources/App/Resources/Assets.xcassets", "Sources/CortexSessionsExtension/Resources/**"],')
+        extension = cortex / "Sources/CortexSessionsExtension"
+        manifest = extension / "CortexSessionsExtension.swift"
+        replace(manifest, ".colorWorkspace, .reorderWorkspace, .editWorkspaceContext, .analyzeWorkspaceContext, .bindAgentSession],", ".colorWorkspace, .reorderWorkspace, .editWorkspaceContext, .analyzeWorkspaceContext, .bindAgentSession, .presentNativeSidebarMenu],")
+        model = extension / "SessionsSidebarModel.swift"
+        replace(model, "import CmuxExtensionKit\n", "import AppKit\nimport CmuxExtensionKit\n")
+        replace(model, "    var editor: SidebarEditorRequest?\n", "    var editor: SidebarEditorRequest?\n    var manualTagRequest: SidebarManualTagRequest?\n    var selectedWorkspaceIDs = Set<UUID>()\n    private var selectionAnchorID: UUID?\n    @ObservationIgnored let tagCatalog: SidebarCanonicalTagCatalog? = {\n        guard let url = Bundle.main.url(forResource: \"CanonicalSessionTags\", withExtension: \"json\"),\n              let data = try? Data(contentsOf: url) else { return nil }\n        return try? SidebarCanonicalTagCatalog.decode(data)\n    }()\n")
+        replace(model, "        snapshot = incoming\n", "        snapshot = incoming\n        selectedWorkspaceIDs.formIntersection(Set(incoming.workspaces.map(\\.id)))\n")
+        replace(model, "        let surface = surfaceId.flatMap(UUID.init(uuidString:))\n", "        let surface = surfaceId.flatMap(UUID.init(uuidString:))\n        if surface == nil {\n            let modifiers = NSEvent.modifierFlags\n            let order = snapshot?.workspaces.map(\\.id) ?? []\n            if modifiers.contains(.shift), let anchor = selectionAnchorID,\n               let from = order.firstIndex(of: anchor), let to = order.firstIndex(of: id) {\n                selectedWorkspaceIDs = Set(order[min(from, to)...max(from, to)])\n            } else if modifiers.contains(.command) {\n                if selectedWorkspaceIDs.contains(id) { selectedWorkspaceIDs.remove(id) }\n                else { selectedWorkspaceIDs.insert(id) }\n                selectionAnchorID = id\n            } else { selectedWorkspaceIDs = [id]; selectionAnchorID = id }\n        }\n")
+        root = extension / "SidebarRootView.swift"
+        replace(root, "        .sheet(item: $model.editor)", "        .sheet(item: $model.manualTagRequest) { request in\n            if let catalog = model.tagCatalog {\n                SidebarManualTagPicker(request: request, catalog: catalog, model: model, onClose: {\n                    if model.manualTagRequest?.id == request.id { model.manualTagRequest = nil }\n                })\n            }\n        }\n        .sheet(item: $model.editor)")
+        replace(root, "                    isOrganizing: model.isOrganizing)", "                    onManualTag: model.allows(.editWorkspaceContext) && model.tagCatalog != nil ? {\n                        guard let snapshot = model.snapshot, let windowID = snapshot.windowID,\n                              let id = snapshot.selectedWorkspaceID, let workspace = model.workspace(id.uuidString) else { return }\n                        model.manualTagRequest = .init(workspaceID: id, windowID: windowID, revision: workspace.context?.revision ?? 0)\n                    } : nil,\n                    isOrganizing: model.isOrganizing)")
+        replace(root, ".contextMenu { FolderActionsMenu(groupID: section.id, model: model) }", ".contextMenu { if !model.allows(.presentNativeSidebarMenu) { FolderActionsMenu(groupID: section.id, model: model) } }\n                                .overlay {\n                                    if model.allows(.presentNativeSidebarMenu), let id = model.group(section.id)?.id {\n                                        NativeWorkspaceParityMenu { model.perform(\"Menu natif indisponible\") { try await $0.performClassicMenu(.presentGroupMenu(groupID: id)) } }\n                                    }\n                                }")
+        replace(root, "workspaceMenu: AnyView(WorkspaceActionsMenu(workspaceID: row.id, model: model)),", "workspaceMenu: AnyView(Group { if !model.allows(.presentNativeSidebarMenu) { WorkspaceActionsMenu(workspaceID: row.id, model: model) } }),\n                                    onNativeContextMenu: model.allows(.presentNativeSidebarMenu) ? {\n                                        guard let id = UUID(uuidString: row.id) else { return }\n                                        let targets = (model.snapshot?.workspaces ?? []).compactMap { model.selectedWorkspaceIDs.contains($0.id) ? $0.id : nil }\n                                        model.perform(\"Menu natif indisponible\") { try await $0.performClassicMenu(.presentWorkspaceMenu(workspaceID: id, selectedWorkspaceIDs: targets)) }\n                                    } : nil,")
+        replace(root, "sidebarWidth: sidebarWidth\n", "sidebarWidth: sidebarWidth,\n                                    isMultiSelected: UUID(uuidString: row.id).map(model.selectedWorkspaceIDs.contains) ?? false\n")
+        chrome = extension / "SidebarChrome.swift"
+        replace(chrome, "    var isOrganizing = false", "    var onManualTag: (() -> Void)? = nil\n    var isOrganizing = false")
+        replace(chrome, "                    if let onOrganize {", "                    if let onManualTag {\n                        Section(\"Classification\") { Button(\"Ajouter une classification au projet sélectionné…\", action: onManualTag) }\n                    }\n                    if let onOrganize {")
+        row = extension / "CompactWorkspaceRowView.swift"
+        replace(row, "    var workspaceMenu: AnyView? = nil\n", "    var workspaceMenu: AnyView? = nil\n    var onNativeContextMenu: (() -> Void)? = nil\n")
+        replace(row, "    var sidebarWidth: CGFloat? = nil\n", "    var sidebarWidth: CGFloat? = nil\n    var isMultiSelected = false\n")
+        replace(row, '.accessibilityIdentifier("workspace:\\(row.id)")', '.overlay { if let onNativeContextMenu { NativeWorkspaceParityMenu(onPresent: onNativeContextMenu) } }\n                .accessibilityIdentifier("workspace:\\(row.id)")')
+        replace(row, ".background(row.workspace.isSelected ? SidebarPalette.accent.opacity(0.10)", ".background(row.workspace.isSelected || isMultiSelected ? SidebarPalette.accent.opacity(0.10)")
+        replace(row, "        Circle().fill(badge == .unknown ? Color.clear : SidebarActivityPresentation.color(badge))", "        Image(systemName: SidebarNativeStatusPresentation(badge: badge).activitySymbol)\n            .font(.system(size: 7, weight: .semibold))\n            .foregroundStyle(SidebarActivityPresentation.color(badge))")
+        replace(row, "            .overlay { if badge == .unknown { Circle().stroke(SidebarPalette.secondary, lineWidth: 1) } }\n", "")
+        replace(row, "            .help(badge.label).accessibilityLabel(badge.label)", "            .help(SidebarNativeStatusPresentation(badge: badge).activityLabel)\n            .accessibilityLabel(SidebarNativeStatusPresentation(badge: badge).activityLabel)")
+        replace(row, "SidebarActivityDot(badge: group.sessions.contains(where: \\.hasPendingUserAction) ? .needsInput : groupBadge)", "SidebarActivityDot(badge: groupBadge, pendingUserActionCount: group.sessions.filter(\\.hasPendingUserAction).count)")
+        replace(row, "SidebarActivityDot(badge: session.hasPendingUserAction ? .needsInput : session.badge)", "SidebarActivityDot(badge: session.badge, pendingUserActionCount: session.pendingUserActionCount)")
+        replace(row, "private struct SidebarActivityDot: View {\n    let badge: SidebarBadge", "private struct SidebarActivityDot: View {\n    let badge: SidebarBadge\n    var pendingUserActionCount: Int = 0")
+        replace(row, "            .background(SidebarPalette.background, in: Circle())", "            .background(SidebarPalette.background, in: Circle())\n            .overlay(alignment: .bottomTrailing) {\n                if pendingUserActionCount > 0 && badge != .needsInput && badge != .planAwaitingValidation {\n                    Image(systemName: \"bell.fill\").font(.system(size: 5, weight: .semibold))\n                        .foregroundStyle(CortexVisualTokens.warning).offset(x: 2, y: 4)\n                        .accessibilityLabel(\"Needs input\")\n                }\n            }")
+        row.write_text(row.read_text().replace("session.badge.label", "SidebarNativeStatusPresentation(badge: session.badge).activityLabel"))
+        layout = cortex / "scripts/verify-sidebar-layout.sh"
+        replace(layout, "    cat Sources/SessionsContract/SidebarAgentObservation.swift", "    cat Sources/SessionsContract/SidebarNativeStatusPresentation.swift\n    cat Sources/SessionsContract/SidebarAgentObservation.swift")
+        replace(layout, "    sed '/^import SessionsContract$/d' Sources/CortexSessionsExtension/CompactWorkspaceRowView.swift", "    cat Sources/CortexSessionsExtension/NativeWorkspaceParityMenu.swift\n    sed '/^import SessionsContract$/d' Sources/CortexSessionsExtension/CompactWorkspaceRowView.swift")
+        project = cortex / "Project.swift"
+        replace(project, 'resources: ["Sources/App/Resources/Assets.xcassets"],', 'resources: ["Sources/App/Resources/Assets.xcassets", "Sources/CortexSessionsExtension/Resources/**"],')
 
-    # The immutable recovery baseline exposes these diagnostics under the host
-    # transport SPI; its TerminalController caller must import that same SPI.
-    replace(cmux / "Sources/TerminalController.swift", "import CmuxSidebar\n",
-            "@_spi(CmuxHostTransport) import CmuxSidebar\n")
-    host_grants = cmux / "Sources/CMUXInstalledExtensionSidebarHostView.swift"
-    replace(host_grants, "        switch actionScope {\n        case .bindAgentSession:",
-            '        switch actionScope {\n        case .presentNativeSidebarMenu:\n            return String(localized: "sidebar.extensions.permission.presentNativeSidebarMenu.detail", defaultValue: "Show CMUX workspace and group menus. Commands run only when you choose a menu item.")\n        case .bindAgentSession:')
-    replace(host_grants, "    var displayName: String {\n        switch self {\n        case .bindAgentSession:",
-            '    var displayName: String {\n        switch self {\n        case .presentNativeSidebarMenu:\n            return String(localized: "sidebar.extensions.actionScope.presentNativeSidebarMenu", defaultValue: "Open native sidebar menus")\n        case .bindAgentSession:')
+        # The immutable recovery baseline exposes these diagnostics under the host
+        # transport SPI; its TerminalController caller must import that same SPI.
+        replace(cmux / "Sources/TerminalController.swift", "import CmuxSidebar\n",
+                "@_spi(CmuxHostTransport) import CmuxSidebar\n")
+        host_grants = cmux / "Sources/CMUXInstalledExtensionSidebarHostView.swift"
+        replace(host_grants, "        switch actionScope {\n        case .bindAgentSession:",
+                '        switch actionScope {\n        case .presentNativeSidebarMenu:\n            return String(localized: "sidebar.extensions.permission.presentNativeSidebarMenu.detail", defaultValue: "Show CMUX workspace and group menus. Commands run only when you choose a menu item.")\n        case .bindAgentSession:')
+        replace(host_grants, "    var displayName: String {\n        switch self {\n        case .bindAgentSession:",
+                '    var displayName: String {\n        switch self {\n        case .presentNativeSidebarMenu:\n            return String(localized: "sidebar.extensions.actionScope.presentNativeSidebarMenu", defaultValue: "Open native sidebar menus")\n        case .bindAgentSession:')
 
     receipt = {"schemaVersion": 1, "cmuxBaseSHA": cmux_sha, "cortexBaseSHA": cortex_sha,
                "productionActivationAllowed": False, "sourceArchivesIncludeForeignWIP": False,
-               "cmuxPinnedGitlinks": gitlinks, "patches": {}}
+               "cmuxPinnedGitlinks": gitlinks, "additionsCommits": addition_heads,
+               "integratedCortexLeaves": integrated_leaves,
+               "integratedBases": args.integrated_bases, "searchOnly": args.search_only,
+               "searchBuildConfigCommit": args.search_build_config_commit, "producerSHA256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(), "patches": {}}
     for name, stage in [("cmux", cmux), ("Cortex", cortex)]:
         git(stage, "add", "--all")
         patch = git(stage, "diff", "--cached", "--binary", "--full-index", cmux_sha if stage == cmux else cortex_sha)
