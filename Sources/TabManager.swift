@@ -2093,6 +2093,9 @@ class TabManager: ObservableObject {
             usesTopLevelRows: usesTopLevelRows,
             explicitGroupId: explicitGroupId
         )
+        if handled, isDragOperation, let explicitGroupId {
+            clearAutomaticPlacementForExplicitSidebarDrop([tabId], groupID: explicitGroupId)
+        }
         cleanupGeneratedAnchorsAfterWorkspaceRemoval(
             previousMemberships: previousMemberships
         )
@@ -2117,10 +2120,25 @@ class TabManager: ObservableObject {
             usesTopLevelRows: usesTopLevelRows,
             explicitGroupId: explicitGroupId
         )
+        if handled, isDragOperation, let explicitGroupId {
+            clearAutomaticPlacementForExplicitSidebarDrop(tabIds, groupID: explicitGroupId)
+        }
         cleanupGeneratedAnchorsAfterWorkspaceRemoval(
             previousMemberships: previousMemberships
         )
         return handled
+    }
+
+    /// A successful explicit native drop chooses membership even when it is
+    /// unchanged. Group-anchor drags only reorder a section and keep provenance.
+    private func clearAutomaticPlacementForExplicitSidebarDrop(_ workspaceIDs: [UUID], groupID: UUID) {
+        let requested = Set(workspaceIDs)
+        let anchors = Set(workspaceGroups.compactMap(\.liveAnchorWorkspaceId))
+        for workspace in tabs where requested.contains(workspace.id)
+            && !anchors.contains(workspace.id) && workspace.groupId == groupID
+            && workspace.groupPlacement?.origin == .automatic {
+            workspace.groupPlacement = nil
+        }
     }
 
     private func workspaceGroupMemberships(for workspaceIds: [UUID]) -> [UUID: UUID] {
