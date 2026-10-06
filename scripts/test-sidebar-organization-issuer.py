@@ -77,7 +77,7 @@ actor Probe:CommandRunning {
   typealias P=SidebarOrganizationPlan
   var checks:[String:Bool]=[:]
   func rejects(_ action:() async throws -> Void) async -> Bool {do{try await action();return false}catch{return true}}
-  func fixture(grouped:Bool=false,semantic:Bool=false,manualRepository:Bool=false,rejectedRepository:Bool=false) throws -> (TabManager,Workspace,Probe,SidebarOrganizationPlanIssuer) {
+  func fixture(grouped:Bool=false,semantic:Bool=false,manualRepository:Bool=false,rejectedRepository:Bool=false,classificationTicket:UUID?=nil) throws -> (TabManager,Workspace,Probe,SidebarOrganizationPlanIssuer) {
    let m=TabManager(),w=Workspace(),p=Probe();m.tabs=[w];m.selectedTabId=w.id;m.sidebarSelectedWorkspaceIds=[w.id]
    w.isPinned=true
    let manual=CmuxSidebarContextTag(id:"topic:hr",label:"HR",dimension:"topic",origin:.manual,source:"user")
@@ -95,7 +95,8 @@ actor Probe:CommandRunning {
    let reader=SidebarOrganizationRegistryReader(engineURL:URL(fileURLWithPath:"/immutable/engine.py"),rulesURL:URL(fileURLWithPath:"/current/rules.yaml"),commands:p,pythonCandidates:["/python"])
    let issuer=SidebarOrganizationPlanIssuer(registry:reader)
    let inventory=try SidebarOrganizationNativeAdapter(manager:m,registryFingerprint:String(repeating:"a",count:64)).inventory()
-   issuer.retain(output:.init(schemaVersion:1,proposals:[row],diagnostics:[],registryFingerprint:String(repeating:"a",count:64)),input:SidebarOrganizationInventoryBuilder().make(tabManager:m),inventory:inventory)
+   let nativeInput=SidebarOrganizationInventoryBuilder().make(tabManager:m)
+   RETAIN_CLASSIFICATION
    return(m,w,p,issuer)
   }
   let(m,w,probe,issuer)=try fixture();let before=w.workspaceContext.context;let surfaces=w.surfaces
@@ -151,6 +152,11 @@ actor Probe:CommandRunning {
   checks["current manual dimension fences retained registered suggestion"] = await rejects{_ = try await manualDimensionIssuer.prepare(manager:manualDimension,authorized:{true})} && manualDimension.writes == 0 && manualRow.workspaceContext.context.tags.contains{$0.id=="repository:other" && $0.origin == .manual}
   let(rejectedTag,_,_,rejectedTagIssuer)=try fixture(rejectedRepository:true)
   checks["current rejected tag fences restored retained suggestion"] = await rejects{_ = try await rejectedTagIssuer.prepare(manager:rejectedTag,authorized:{true})} && rejectedTag.writes == 0
+  let ticketA=UUID(),ticketB=UUID()
+  let(ticketManager,_,_,ticketIssuer)=try fixture(classificationTicket:ticketB)
+  func prepareTicket(_ expected:UUID) async throws -> P {PREPARE_CLASSIFICATION}
+  checks["different retained classification cannot authorize requested plan"] = await rejects{_ = try await prepareTicket(ticketA)} && ticketManager.writes == 0
+  checks["exact retained classification authorizes its reviewed mapping"] = try await prepareTicket(ticketB).assignments.count == 1
   _ = probe
   print(String(decoding:try JSONSerialization.data(withJSONObject:checks,options:.sortedKeys),as:UTF8.self))
  }
@@ -173,14 +179,19 @@ def main():
         foundation = ROOT/'Packages/macOS/CmuxFoundation/Sources/CmuxFoundation/Process'
         (p/'Runner.swift').write_text('import Foundation\npublic struct CommandRunner:CommandRunning {public init(maximumCaptureBytes:Int?=nil){}\npublic func run(directory:String,executable:String,arguments:[String],timeout:TimeInterval?) async->CommandResult{fatalError("test injects protocol seam")}}\n')
         run('xcrun', 'swiftc', '-swift-version', '6', '-emit-library', '-emit-module', '-module-name', 'CmuxFoundation', '-emit-module-path', str(p/'CmuxFoundation.swiftmodule'), '-o', str(p/'libCmuxFoundation.dylib'), str(foundation/'CommandRunning.swift'), str(foundation/'CommandResult.swift'), str(p/'Runner.swift'))
-        (p/'Contract.swift').write_text(HARNESS)
+        # Commit the missing-ticket regression against the actual old issuer,
+        # then call the additive API once present. No fake authorization grants.
+        ticket = 'classificationID:' in (ROOT/'Sources/SidebarOrganizationPlanIssuer.swift').read_text()
+        retain = 'issuer.retain(output:.init(schemaVersion:1,proposals:[row],diagnostics:[],registryFingerprint:String(repeating:"a",count:64)),input:nativeInput,inventory:inventory' + (',classificationID:classificationTicket ?? nativeInput.id)' if ticket else ')')
+        prepare = 'try await ticketIssuer.prepare(manager:ticketManager,authorized:{true}' + (',classificationID:expected)' if ticket else ')')
+        (p/'Contract.swift').write_text(HARNESS.replace('RETAIN_CLASSIFICATION',retain).replace('PREPARE_CLASSIFICATION',prepare))
         files = ['WorkspaceContextModel.swift', 'SidebarOrganizationInput.swift', 'SidebarOrganizationOutput.swift', 'SidebarOrganizationPlan.swift', 'SidebarOrganizationPlanCoordinator.swift', 'SidebarOrganizationPlacement.swift', 'SidebarOrganizationPlacementLedger.swift', 'SidebarOrganizationNativeAdapter.swift', 'SidebarOrganizationRegistryReader.swift', 'SidebarOrganizationPlanIssuer.swift']
         run('xcrun', 'swiftc', '-swift-version', '6', '-I', str(p), '-L', str(p), '-lCmuxExtensionKit', '-lCmuxSentryScrubbing', '-lCmuxFoundation', '-Xlinker', '-rpath', '-Xlinker', str(p), *[str(ROOT/'Sources'/n) for n in files], str(p/'Contract.swift'), '-o', str(p/'contract'))
         checks = json.loads(run(str(p/'contract')).stdout)
         for name, passed in checks.items():
             print(('PASS ' if passed else 'FAIL ')+name)
         print(json.dumps({'passed': sum(checks.values()), 'failed': sum(not value for value in checks.values())}))
-        return 0 if len(checks) == 23 and all(checks.values()) else 1
+        return 0 if len(checks) == 25 and all(checks.values()) else 1
 
 
 if __name__ == '__main__':
