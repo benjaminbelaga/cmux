@@ -253,19 +253,34 @@ def generated_sdk_project(path, expected_sources):
                 "SWIFT_VERSION": "5.0", "GCC_C_LANGUAGE_STANDARD": "gnu11"}
             require(all(key not in settings or settings[key] == expected
                 for key, expected in closed_inputs.items()), "foreign generated SDK path or tool setting")
-            conditions = ["$(inherited)", "SWIFT_PACKAGE"] if label == "project" else ["$(inherited)", "DEBUG"]
-            require("SWIFT_ACTIVE_COMPILATION_CONDITIONS" not in settings
-                or settings["SWIFT_ACTIVE_COMPILATION_CONDITIONS"] == conditions,
-                "foreign generated SDK compilation condition")
+            # Xcode also compiles its automatic apple-generic version C source.
+            # Its version/symbol inputs and the deployment target must not be
+            # caller-controlled, including through project-level overrides.
+            codegen = {"CURRENT_PROJECT_VERSION": "1", "VERSION_INFO_PREFIX": "",
+                "VERSIONING_SYSTEM": "apple-generic", "FRAMEWORK_VERSION": "A",
+                "DYLIB_COMPATIBILITY_VERSION": "1", "DYLIB_CURRENT_VERSION": "1",
+                "MACOSX_DEPLOYMENT_TARGET": "14.0"}
+            require(all((key in settings if label == "target" else True)
+                and (key not in settings or settings[key] == expected)
+                for key, expected in codegen.items()), "foreign or absent generated SDK codegen setting")
+            if label == "target" and config["name"] == "Release":
+                require("SWIFT_ACTIVE_COMPILATION_CONDITIONS" not in settings,
+                    "foreign generated SDK Release compilation condition")
+            else:
+                conditions = ["$(inherited)", "SWIFT_PACKAGE"] if label == "project" else ["$(inherited)", "DEBUG"]
+                require(settings.get("SWIFT_ACTIVE_COMPILATION_CONDITIONS") == conditions,
+                    "foreign or absent generated SDK compilation condition")
             definitions = ["$(inherited)"] + (["DEBUG=1"] if config["name"] == "Debug" else []) + ["SWIFT_PACKAGE=1"]
             require("GCC_PREPROCESSOR_DEFINITIONS" not in settings
                 or label == "project" and settings["GCC_PREPROCESSOR_DEFINITIONS"] == definitions,
                 "foreign generated SDK preprocessor input")
-            require("SWIFT_COMPILATION_MODE" not in settings
-                or settings["SWIFT_COMPILATION_MODE"] in {"singlefile", "wholemodule"},
+            mode = "singlefile" if config["name"] == "Debug" else "wholemodule"
+            optimization = "-Onone" if config["name"] == "Debug" else "-O"
+            require(("SWIFT_COMPILATION_MODE" in settings if label == "target" else True)
+                and ("SWIFT_COMPILATION_MODE" not in settings or settings["SWIFT_COMPILATION_MODE"] == mode),
                 "foreign generated SDK compilation mode")
-            require("SWIFT_OPTIMIZATION_LEVEL" not in settings
-                or settings["SWIFT_OPTIMIZATION_LEVEL"] in {"-O", "-Onone"},
+            require(("SWIFT_OPTIMIZATION_LEVEL" in settings if label == "target" else True)
+                and ("SWIFT_OPTIMIZATION_LEVEL" not in settings or settings["SWIFT_OPTIMIZATION_LEVEL"] == optimization),
                 "foreign generated SDK optimization flag")
             if label == "target":
                 require(settings.get("INFOPLIST_FILE") == info_path
@@ -277,6 +292,9 @@ def generated_sdk_project(path, expected_sources):
         if item["isa"] == "XCBuildConfiguration"}, "orphan generated SDK compiler configuration")
     require(configuration_lists == {identifier for identifier, item in objects.items()
         if item["isa"] == "XCConfigurationList"}, "orphan SDK configuration list")
+    # This closes the archived Swift source graph and known automatic version
+    # generation settings. It does not claim that Swift files are every input
+    # the Xcode toolchain generates or independently reproduce compiled bytes.
     return fingerprint({"sourcePaths": sorted(expected_sources), "settings": settings_proof})
 
 
@@ -339,6 +357,7 @@ def sdk_proof(source, revision, materialized):
         revision + ":" + prefix], check=True, capture_output=True, text=True,
         timeout=30).stdout.strip()
     return {"revision": revision, "source": str(Path(source).resolve(strict=True)),
+        # sourcePaths enumerates archived Swift files, not automatic Xcode C.
         "treeSHA": tree, "filesFingerprint": fingerprint(expected), "sourcePaths": sorted(source_paths),
         "generatedArtifacts": generated, "generatedArtifactsFingerprint": fingerprint(generated),
         "generatedCompilerClosureFingerprint": closure}
