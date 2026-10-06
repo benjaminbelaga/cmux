@@ -2120,7 +2120,8 @@ class TabManager: ObservableObject {
             usesTopLevelRows: usesTopLevelRows,
             explicitGroupId: explicitGroupId
         )
-        if handled, isDragOperation, let explicitGroupId {
+        if handled, isDragOperation, let explicitGroupId,
+           !workspaceGroups.contains(where: { $0.liveAnchorWorkspaceId == draggedTabId }) {
             clearAutomaticPlacementForExplicitSidebarDrop(tabIds, groupID: explicitGroupId)
         }
         cleanupGeneratedAnchorsAfterWorkspaceRemoval(
