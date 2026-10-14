@@ -57,6 +57,7 @@ jobs:
         run: |
           set -o pipefail
           export CMUX_DERIVED_DATA_PATH="$RUNNER_TEMP/yoyaku-tests"
+          mkdir -p "$CMUX_DERIVED_DATA_PATH"
           ./scripts/ci/run-app-host-xcodebuild.sh \
             -project cmux.xcodeproj -scheme cmux-unit -configuration Debug \
             -destination platform=macOS -derivedDataPath "$RUNNER_TEMP/yoyaku-tests" \
