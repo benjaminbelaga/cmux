@@ -6,6 +6,7 @@ import subprocess
 import tempfile
 import shutil
 import unittest
+from unittest.mock import patch
 
 HERE = pathlib.Path(__file__).resolve().parent
 spec = importlib.util.spec_from_file_location("artifact", HERE / "local-artifact.py")
@@ -60,6 +61,13 @@ class LocalLaunchTests(unittest.TestCase):
             git("checkout", "--", "cmux-tui")
             (archive / "cmux-tui-artifacts.yml").write_text("changed workflow")
             self.assertFalse(accepted())
+
+    def test_signature_requirement_is_inline_not_a_filename(self):
+        with patch.object(installer, "run") as command:
+            installer.verify_signature(pathlib.Path("/fixture/Canary.app"))
+        requirement = command.call_args.args
+        self.assertEqual(requirement[2], "-R")
+        self.assertTrue(requirement[3].startswith("=anchor apple generic"))
 
     def test_signed_out_release_needs_no_credential_and_scrubs_fixtures(self):
         self.assertEqual(self.policy(), 0)

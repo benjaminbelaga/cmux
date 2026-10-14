@@ -45,7 +45,7 @@ def validate_source(info, sha):
 def verify_signature(app):
     run("/usr/bin/codesign", "--verify", "--deep", "--strict", str(app))
     requirement = f'anchor apple generic and identifier "{IDENTITY}" and certificate leaf[subject.OU] = "{TEAM}"'
-    run("/usr/bin/codesign", "--verify", "-R", requirement, str(app))
+    run("/usr/bin/codesign", "--verify", "-R", "=" + requirement, str(app))
 
 
 def sign(app):
