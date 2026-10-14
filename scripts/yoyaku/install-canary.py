@@ -115,7 +115,7 @@ def install(source, sha, launch):
     config.parent.mkdir(parents=True, exist_ok=True)
     if not config.exists():
         with config.open("x") as stream:
-            json.dump({"schemaVersion": 1, "automation": {"socketControlMode": "allowAll"}}, stream)
+            json.dump({"schemaVersion": 1, "automation": {"socketControlMode": "automation"}}, stream)
     ghostty = HOME / "Library/Application Support" / IDENTITY / "config.ghostty"
     ghostty.parent.mkdir(parents=True, exist_ok=True)
     if not ghostty.exists():

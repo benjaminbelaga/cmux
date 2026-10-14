@@ -1,5 +1,6 @@
 import CMUXAgentLaunch
 import Foundation
+import CmuxSettings
 import OSLog
 
 struct CmuxVaultConfigDefinition: Codable, Hashable, Sendable {
@@ -518,14 +519,15 @@ struct CmuxVaultAgentRegistry: Sendable {
         return CmuxVaultAgentRegistry(registrations: registrations)
     }
 
-    private static func configPaths(
+    static func configPaths(
         homeDirectory: String,
         workingDirectory: String?,
         environment: [String: String],
-        fileManager: FileManager
+        fileManager: FileManager,
+        bundleIdentifier: String? = Bundle.main.bundleIdentifier
     ) -> [String] {
         let home = (homeDirectory as NSString).standardizingPath
-        var paths = [(home as NSString).appendingPathComponent(".config/cmux/cmux.json")]
+        var paths = [CmuxConfigLocation(home: URL(fileURLWithPath: home), bundleIdentifier: bundleIdentifier).userConfigFile.path]
         let startingDirectory = workingDirectory?.trimmingCharacters(in: .whitespacesAndNewlines)
             ?? environment["PWD"]?.trimmingCharacters(in: .whitespacesAndNewlines)
         if let startingDirectory, !startingDirectory.isEmpty,

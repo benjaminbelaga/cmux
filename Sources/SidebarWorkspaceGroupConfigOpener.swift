@@ -1,6 +1,7 @@
 import AppKit
 import CmuxWorkspaces
 import Foundation
+import CmuxSettings
 
 /// Opens workspace-group configuration and documentation surfaces.
 enum SidebarWorkspaceGroupConfigOpener {
@@ -30,12 +31,10 @@ enum SidebarWorkspaceGroupConfigOpener {
     /// config first if none exists. Shared by the external-editor path above and
     /// in-app openers (e.g. the plus-button menu's "Customize Workspace Layouts…").
     static func materializedCmuxConfigURL(
-        home: URL = FileManager.default.homeDirectoryForCurrentUser
+        home: URL = FileManager.default.homeDirectoryForCurrentUser,
+        bundleIdentifier: String? = Bundle.main.bundleIdentifier
     ) -> URL {
-        let configURL = home
-            .appendingPathComponent(".config", isDirectory: true)
-            .appendingPathComponent("cmux", isDirectory: true)
-            .appendingPathComponent("cmux.json", isDirectory: false)
+        let configURL = CmuxConfigLocation(home: home, bundleIdentifier: bundleIdentifier).userConfigFile
         if !FileManager.default.fileExists(atPath: configURL.path) {
             try? FileManager.default.createDirectory(
                 at: configURL.deletingLastPathComponent(),

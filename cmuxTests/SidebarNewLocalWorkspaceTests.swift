@@ -13,6 +13,21 @@ import Testing
 @MainActor
 @Suite(.serialized)
 struct SidebarNewLocalWorkspaceTests {
+    @Test func canaryActionsVaultAndConfigEditorUseOnlyTheCanaryConfig() throws {
+        let identity = "com.cmuxterm.app.debug.yoyaku.lordsquire"
+        #expect(CmuxConfig.defaultGlobalConfigPath(bundleIdentifier: identity).hasSuffix("/.config/cmux-yoyaku/cmux.json"))
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let vaultPaths = CmuxVaultAgentRegistry.configPaths(homeDirectory: root.path, workingDirectory: nil,
+            environment: [:], fileManager: .default, bundleIdentifier: identity)
+        #expect(vaultPaths == [root.appendingPathComponent(".config/cmux-yoyaku/cmux.json").path])
+        let opened = SidebarWorkspaceGroupConfigOpener.materializedCmuxConfigURL(home: root, bundleIdentifier: identity)
+        #expect(opened.path == vaultPaths[0])
+        #expect(FileManager.default.fileExists(atPath: opened.path))
+        #expect(!FileManager.default.fileExists(atPath: root.appendingPathComponent(".config/cmux/cmux.json").path))
+    }
+
     @Test func plusMenuAndCommandNCreateLocalWhileCloudIsSelected() async throws {
         try await AppContextSerialGate.withExclusiveAppContext {
             let fixture = try Fixture()
