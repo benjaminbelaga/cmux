@@ -105,6 +105,7 @@ def install(source, sha, launch):
     run("/usr/bin/ditto", str(source), str(staging))
     info = info_at(staging)
     env = info.setdefault("LSEnvironment", {})
+    env["CMUX_BUNDLE_ID"] = IDENTITY
     env["CMUX_BUNDLED_CLI_PATH"] = str(DESTINATION / "Contents/Resources/bin/cmux")
     env["CMUX_SHELL_INTEGRATION_DIR"] = str(DESTINATION / "Contents/Resources/shell-integration")
     with (staging / "Contents/Info.plist").open("wb") as stream:

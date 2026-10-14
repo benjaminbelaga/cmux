@@ -1,4 +1,5 @@
 import CmuxFoundation
+import CmuxSettings
 import Darwin
 import Foundation
 import CMUXAgentLaunch
@@ -763,6 +764,7 @@ enum AgentResumeCommandBuilder {
         return AgentExternalLauncherRegistry.load(
             homeDirectory: NSHomeDirectory(),
             workingDirectory: workingDirectory ?? launchCommand?.workingDirectory,
+            globalConfigPath: CmuxConfigLocation().userConfigFile.path,
             sanitize: { try JSONCParser.preprocess(data: $0) }
         ).resolvedLauncher(id: launcherID, kind: kind.rawValue)
     }

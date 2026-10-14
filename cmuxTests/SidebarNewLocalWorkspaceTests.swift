@@ -1,6 +1,7 @@
 import AppKit
 import CmuxCloudMachines
 import CmuxSettings
+import CMUXAgentLaunch
 import Foundation
 import Testing
 
@@ -25,6 +26,8 @@ struct SidebarNewLocalWorkspaceTests {
         let opened = SidebarWorkspaceGroupConfigOpener.materializedCmuxConfigURL(home: root, bundleIdentifier: identity)
         #expect(opened.path == vaultPaths[0])
         #expect(FileManager.default.fileExists(atPath: opened.path))
+        #expect(AgentExternalLauncherRegistry.configPaths(homeDirectory: root.path, workingDirectory: nil,
+            globalConfigPath: opened.path) == [opened.path])
         #expect(!FileManager.default.fileExists(atPath: root.appendingPathComponent(".config/cmux/cmux.json").path))
     }
 

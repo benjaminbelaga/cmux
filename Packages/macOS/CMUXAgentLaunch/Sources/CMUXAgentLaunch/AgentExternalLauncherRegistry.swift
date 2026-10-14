@@ -87,12 +87,13 @@ public struct AgentExternalLauncherRegistry: Equatable, Sendable {
     public static func configPaths(
         homeDirectory: String,
         workingDirectory: String?,
+        globalConfigPath: String? = nil,
         fileManager: FileManager = .default
     ) -> [String] {
         var paths: [String] = []
         let home = (homeDirectory as NSString).standardizingPath
         paths.append(
-            ((home as NSString).appendingPathComponent(".config/cmux") as NSString)
+            globalConfigPath ?? ((home as NSString).appendingPathComponent(".config/cmux") as NSString)
                 .appendingPathComponent("cmux.json")
         )
         if let workingDirectory = workingDirectory?.trimmingCharacters(in: .whitespacesAndNewlines),
@@ -118,6 +119,7 @@ public struct AgentExternalLauncherRegistry: Equatable, Sendable {
     public static func load(
         homeDirectory: String,
         workingDirectory: String?,
+        globalConfigPath: String? = nil,
         fileManager: FileManager = .default,
         sanitize: (Data) throws -> Data
     ) -> AgentExternalLauncherRegistry {
@@ -125,6 +127,7 @@ public struct AgentExternalLauncherRegistry: Equatable, Sendable {
             configPaths: configPaths(
                 homeDirectory: homeDirectory,
                 workingDirectory: workingDirectory,
+                globalConfigPath: globalConfigPath,
                 fileManager: fileManager
             ),
             fileManager: fileManager,

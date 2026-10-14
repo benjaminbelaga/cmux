@@ -256,7 +256,7 @@ extension CMUXCLI {
     /// Applies a setting change to the global cmux.json through the same
     /// ``JSONConfigStore/apply(_:)`` path setting actions use.
     private func runConfigSettingChange(_ change: CmuxSettingChange, jsonOutput: Bool) throws {
-        let store = JSONConfigStore(fileURL: CmuxConfigLocation().userConfigFile)
+        let store = JSONConfigStore(fileURL: CmuxConfigLocation(bundleIdentifier: CLIExecutableLocator.enclosingAppBundle()?.bundleIdentifier ?? ProcessInfo.processInfo.environment["CMUX_BUNDLE_ID"]).userConfigFile)
         let result: CmuxSettingChangeResult
         do {
             let liveValues = Self.configSettingLiveValues()
@@ -299,7 +299,7 @@ extension CMUXCLI {
     }
 
     private func runConfigGetSetting(path: String, jsonOutput: Bool) throws {
-        let store = JSONConfigStore(fileURL: CmuxConfigLocation().userConfigFile)
+        let store = JSONConfigStore(fileURL: CmuxConfigLocation(bundleIdentifier: CLIExecutableLocator.enclosingAppBundle()?.bundleIdentifier ?? ProcessInfo.processInfo.environment["CMUX_BUNDLE_ID"]).userConfigFile)
         let reading: CmuxSettingReading
         do {
             reading = try store.reading(at: path, liveValues: Self.configSettingLiveValues())

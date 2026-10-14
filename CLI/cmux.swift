@@ -12817,7 +12817,7 @@ struct CMUXCLI {
     /// dev build regardless of bundle id. No running app required: the value is
     /// read/written directly on disk via the store on this no-socket early path.
     private func runWindowDefaultDisplayCommand(commandArgs: [String], jsonOutput: Bool) throws {
-        let store = JSONConfigStore(fileURL: CmuxConfigLocation().userConfigFile)
+        let store = JSONConfigStore(fileURL: CmuxConfigLocation(bundleIdentifier: CLIExecutableLocator.enclosingAppBundle()?.bundleIdentifier ?? ProcessInfo.processInfo.environment["CMUX_BUNDLE_ID"]).userConfigFile)
         let key = SettingCatalog().app.devWindowDisplay
 
         // Bridge the actor-backed store to this synchronous CLI: run the async
@@ -23932,8 +23932,8 @@ struct CMUXCLI {
                 throw CLIError(message: String(localized: "cli.sidebar.try.usage", defaultValue: "Usage: cmux sidebar try <template>"))
             }
             let previewName = "sidebar-preview-\(UUID().uuidString.prefix(8).lowercased())"
-            let directory = FileManager.default.homeDirectoryForCurrentUser
-                .appendingPathComponent(".config/cmux/sidebars", isDirectory: true)
+            let directory = CmuxConfigLocation(bundleIdentifier: CLIExecutableLocator.enclosingAppBundle()?.bundleIdentifier ?? ProcessInfo.processInfo.environment["CMUX_BUNDLE_ID"]).userConfigFile.deletingLastPathComponent()
+                .appendingPathComponent("sidebars", isDirectory: true)
             do {
                 let path = try CustomSidebarTemplateInstaller().install(
                     name: previewName,
@@ -23978,8 +23978,8 @@ struct CMUXCLI {
             guard let templateID else {
                 throw CLIError(message: String(localized: "cli.sidebar.new.missingTemplate", defaultValue: "sidebar new requires --from <template>"))
             }
-            let directory = FileManager.default.homeDirectoryForCurrentUser
-                .appendingPathComponent(".config/cmux/sidebars", isDirectory: true)
+            let directory = CmuxConfigLocation(bundleIdentifier: CLIExecutableLocator.enclosingAppBundle()?.bundleIdentifier ?? ProcessInfo.processInfo.environment["CMUX_BUNDLE_ID"]).userConfigFile.deletingLastPathComponent()
+                .appendingPathComponent("sidebars", isDirectory: true)
             do {
                 let path = try CustomSidebarTemplateInstaller().install(
                     name: name,
@@ -35389,6 +35389,7 @@ struct CMUXCLI {
         let registry = AgentExternalLauncherRegistry.load(
             homeDirectory: NSHomeDirectory(),
             workingDirectory: workingDirectory,
+            globalConfigPath: CmuxConfigLocation(bundleIdentifier: CLIExecutableLocator.enclosingAppBundle()?.bundleIdentifier ?? ProcessInfo.processInfo.environment["CMUX_BUNDLE_ID"]).userConfigFile.path,
             sanitize: { try JSONCParser.preprocess(data: $0) }
         )
         Self.externalAgentLauncherCacheLock.lock()
