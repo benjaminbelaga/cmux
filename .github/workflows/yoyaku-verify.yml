@@ -43,6 +43,8 @@ jobs:
           xcodebuild -version | tee .build/yoyaku-evidence/xcode.txt
       - name: Prepare isolated app host
         run: ./scripts/ci/prepare-app-host-home.sh
+      - name: Install verified Zig for the native app build
+        run: ./scripts/install-zig-ci.sh
       - name: Verify local configuration separation
         shell: bash
         run: |
