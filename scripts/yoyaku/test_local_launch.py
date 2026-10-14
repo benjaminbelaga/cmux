@@ -69,6 +69,32 @@ class LocalLaunchTests(unittest.TestCase):
         self.assertEqual(requirement[2], "-R")
         self.assertTrue(requirement[3].startswith("=anchor apple generic"))
 
+    def test_failed_staging_sign_removes_the_hidden_bundle(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            source = root / "source.app"
+            (source / "Contents").mkdir(parents=True)
+            with (source / "Contents/Info.plist").open("wb") as stream:
+                import plistlib
+                plistlib.dump({"CFBundleIdentifier": installer.IDENTITY,
+                               "CMUXYOYAKULaunchMode": "local",
+                               "CMUXYOYAKUSourceDirty": False,
+                               "CMUXYOYAKUSourceSHA": "a" * 40}, stream)
+            destination = root / "Applications/CMUX YOYAKU.app"
+            state = root / "state"
+            def fake_run(*args):
+                if args[0] == "/usr/bin/ditto":
+                    shutil.copytree(args[1], args[2])
+                return ""
+            with (patch.object(installer, "HOME", root),
+                  patch.object(installer, "DESTINATION", destination),
+                  patch.object(installer, "STATE", state),
+                  patch.object(installer, "run", side_effect=fake_run),
+                  patch.object(installer, "sign", side_effect=RuntimeError("fixture signing failure")),
+                  self.assertRaisesRegex(RuntimeError, "fixture signing failure")):
+                installer.install(source, "a" * 40, False)
+            self.assertEqual(list(destination.parent.glob(".cmux-yoyaku-*.app")), [])
+
     def test_signed_out_release_needs_no_credential_and_scrubs_fixtures(self):
         self.assertEqual(self.policy(), 0)
 

@@ -9,6 +9,7 @@ import os
 from pathlib import Path
 import plistlib
 import re
+import shutil
 import subprocess
 import tempfile
 import time
@@ -103,49 +104,53 @@ def install(source, sha, launch):
     generation = uuid.uuid4().hex
     staging = DESTINATION.parent / f".cmux-yoyaku-{generation}.app"
     run("/usr/bin/ditto", str(source), str(staging))
-    info = info_at(staging)
-    env = info.setdefault("LSEnvironment", {})
-    env["CMUX_BUNDLE_ID"] = IDENTITY
-    env["CMUX_BUNDLED_CLI_PATH"] = str(DESTINATION / "Contents/Resources/bin/cmux")
-    env["CMUX_SHELL_INTEGRATION_DIR"] = str(DESTINATION / "Contents/Resources/shell-integration")
-    with (staging / "Contents/Info.plist").open("wb") as stream:
-        plistlib.dump(info, stream)
-    sign(staging)
-    # These files prevent native fallback to the official host's settings.
-    config = HOME / ".config/cmux-yoyaku/cmux.json"
-    config.parent.mkdir(parents=True, exist_ok=True)
-    if not config.exists():
-        with config.open("x") as stream:
-            json.dump({"schemaVersion": 1, "automation": {"socketControlMode": "automation"}}, stream)
-    ghostty = HOME / "Library/Application Support" / IDENTITY / "config.ghostty"
-    ghostty.parent.mkdir(parents=True, exist_ok=True)
-    if not ghostty.exists():
-        ghostty.write_text("# CMUX YOYAKU isolated local configuration\n")
-    stop_owned_canary()
-    backup = STATE / "backups" / f"{generation}.app"
-    backup.parent.mkdir(exist_ok=True)
-    prior = json.loads((STATE / "accepted.json").read_text()) if (STATE / "accepted.json").exists() else None
-    if DESTINATION.exists():
-        DESTINATION.replace(backup)
     try:
-        staging.replace(DESTINATION)
-        verify_signature(DESTINATION)
-        receipt = {"generation": generation, "source_sha": sha, "bundle_id": IDENTITY, "team": TEAM,
-                   "installed_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
-                   "destination": str(DESTINATION), "backup": str(backup) if backup.exists() else None,
-                   "previous": prior,
-                   "info_sha256": hashlib.sha256((DESTINATION / "Contents/Info.plist").read_bytes()).hexdigest()}
-        atomic_json(STATE / f"{generation}.json", receipt)
-        atomic_json(STATE / "accepted.json", receipt)
-    except BaseException:
+        info = info_at(staging)
+        env = info.setdefault("LSEnvironment", {})
+        env["CMUX_BUNDLE_ID"] = IDENTITY
+        env["CMUX_BUNDLED_CLI_PATH"] = str(DESTINATION / "Contents/Resources/bin/cmux")
+        env["CMUX_SHELL_INTEGRATION_DIR"] = str(DESTINATION / "Contents/Resources/shell-integration")
+        with (staging / "Contents/Info.plist").open("wb") as stream:
+            plistlib.dump(info, stream)
+        sign(staging)
+        # These files prevent native fallback to the official host's settings.
+        config = HOME / ".config/cmux-yoyaku/cmux.json"
+        config.parent.mkdir(parents=True, exist_ok=True)
+        if not config.exists():
+            with config.open("x") as stream:
+                json.dump({"schemaVersion": 1, "automation": {"socketControlMode": "automation"}}, stream)
+        ghostty = HOME / "Library/Application Support" / IDENTITY / "config.ghostty"
+        ghostty.parent.mkdir(parents=True, exist_ok=True)
+        if not ghostty.exists():
+            ghostty.write_text("# CMUX YOYAKU isolated local configuration\n")
+        stop_owned_canary()
+        backup = STATE / "backups" / f"{generation}.app"
+        backup.parent.mkdir(exist_ok=True)
+        prior = json.loads((STATE / "accepted.json").read_text()) if (STATE / "accepted.json").exists() else None
         if DESTINATION.exists():
-            DESTINATION.replace(STATE / f"failed-{generation}.app")
-        if backup.exists():
-            backup.replace(DESTINATION)
-        raise
-    if launch:
-        run("/usr/bin/open", "-g", "-n", str(DESTINATION))
-    print(json.dumps({"installed": True, "source_sha": sha, "receipt": str(STATE / f"{generation}.json")}))
+            DESTINATION.replace(backup)
+        try:
+            staging.replace(DESTINATION)
+            verify_signature(DESTINATION)
+            receipt = {"generation": generation, "source_sha": sha, "bundle_id": IDENTITY, "team": TEAM,
+                       "installed_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                       "destination": str(DESTINATION), "backup": str(backup) if backup.exists() else None,
+                       "previous": prior,
+                       "info_sha256": hashlib.sha256((DESTINATION / "Contents/Info.plist").read_bytes()).hexdigest()}
+            atomic_json(STATE / f"{generation}.json", receipt)
+            atomic_json(STATE / "accepted.json", receipt)
+        except BaseException:
+            if DESTINATION.exists():
+                DESTINATION.replace(STATE / f"failed-{generation}.app")
+            if backup.exists():
+                backup.replace(DESTINATION)
+            raise
+        if launch:
+            run("/usr/bin/open", "-g", "-n", str(DESTINATION))
+        print(json.dumps({"installed": True, "source_sha": sha, "receipt": str(STATE / f"{generation}.json")}))
+    finally:
+        if staging.exists():
+            shutil.rmtree(staging)
 
 
 def rollback(receipt_path):
