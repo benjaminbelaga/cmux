@@ -2044,7 +2044,11 @@ if [[ -n "$TAG" && "$APP_NAME" != "$SEARCH_APP_NAME" ]]; then
       /usr/libexec/PlistBuddy -c "Add :CMUXCloudDogfoodEnabled bool ${CMUX_DEV_CLOUD_ENABLED:-1}" "$INFO_PLIST"
       set_plist_env "$INFO_PLIST" CMUX_AUTH_CALLBACK_SCHEME "$CMUX_AUTH_CALLBACK_SCHEME_VALUE"
       set_plist_env "$INFO_PLIST" CMUX_SOCKET_ENABLE "1"
-      set_plist_env "$INFO_PLIST" CMUX_SOCKET_MODE "allowAll"
+      if [[ "$YOYAKU_LOCAL_ONLY" -eq 1 ]]; then
+        set_plist_env "$INFO_PLIST" CMUX_SOCKET_MODE "$(cmux_yoyaku_socket_control_mode 1)"
+      else
+        set_plist_env "$INFO_PLIST" CMUX_SOCKET_MODE "allowAll"
+      fi
       set_plist_env "$INFO_PLIST" CMUX_REMOTE_DAEMON_ALLOW_LOCAL_BUILD "1"
       set_plist_env "$INFO_PLIST" CMUXTERM_REPO_ROOT "$PWD"
       BUNDLED_APP_PATH="$TAG_APP_FINAL_PATH"

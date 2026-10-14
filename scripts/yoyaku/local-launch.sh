@@ -44,3 +44,8 @@ cmux_yoyaku_tui_source() {
   done
   printf '%s\n' "$base"
 }
+
+cmux_yoyaku_socket_control_mode() {
+  [[ "${1:-}" == 1 ]] || { echo "error: local canary requires local-only flag 1" >&2; return 2; }
+  printf '%s\n' automation
+}

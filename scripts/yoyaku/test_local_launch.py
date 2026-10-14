@@ -120,6 +120,18 @@ class LocalLaunchTests(unittest.TestCase):
     def test_signed_out_release_needs_no_credential_and_scrubs_fixtures(self):
         self.assertEqual(self.policy(), 0)
 
+    def test_local_canary_socket_mode_is_restricted_to_automation(self):
+        result = subprocess.run(["bash", "-c",
+            'source "$1"; test "$(cmux_yoyaku_socket_control_mode 1)" = automation',
+            "socket-mode", str(HERE / "local-launch.sh")], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        invalid = subprocess.run(["bash", "-c", 'source "$1"; cmux_yoyaku_socket_control_mode 0',
+            "socket-mode", str(HERE / "local-launch.sh")], capture_output=True, text=True)
+        self.assertNotEqual(invalid.returncode, 0)
+        reload_script = (HERE.parent / "reload.sh").read_text()
+        self.assertIn('set_plist_env "$INFO_PLIST" CMUX_SOCKET_MODE "$(cmux_yoyaku_socket_control_mode 1)"', reload_script)
+        self.assertIn('set_plist_env "$INFO_PLIST" CMUX_SOCKET_MODE "allowAll"', reload_script)
+
     def test_other_tags_debug_and_every_auth_input_are_rejected(self):
         for args in [("other",), ("yoyaku-lordsquire", "Debug"),
                      ("yoyaku-lordsquire", "Release", "1"),
