@@ -16,16 +16,15 @@ final class CmuxSettingsFileStore {
     fileprivate static let socketPasswordBackupIdentifier = "automation.socketPassword"
 
     static var defaultPrimaryPath: String {
-        let home = FileManager.default.homeDirectoryForCurrentUser.path
-        return (home as NSString).appendingPathComponent(".config/cmux/cmux.json")
+        CmuxConfigLocation().userConfigFile.path
     }
 
     static var defaultFallbackPath: String? {
-        let home = FileManager.default.homeDirectoryForCurrentUser.path
-        return (home as NSString).appendingPathComponent(".config/cmux/settings.json")
+        CmuxConfigLocation().legacyFallbackFile.path
     }
 
     static var defaultApplicationSupportFallbackPath: String? {
+        guard Bundle.main.bundleIdentifier != "com.cmuxterm.app.debug.yoyaku.lordsquire" else { return nil }
         guard let appSupport = FileManager.default.urls(
             for: .applicationSupportDirectory,
             in: .userDomainMask

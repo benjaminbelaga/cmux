@@ -21,6 +21,7 @@ DERIVED_SET=0
 TAG=""
 LAUNCH=0
 BUILD_ONLY=0
+YOYAKU_LOCAL_ONLY=0
 CMUX_DEBUG_LOG=""
 CMUX_DEV_PORT=""
 CMUX_DEV_PORT_END=""
@@ -916,6 +917,9 @@ Options:
   --release              Build the Release configuration (optimized, no DEBUG) of
                          this tagged app, for dogfooding real performance. The
                          debug.* socket commands are compiled out.
+  --local-only           YOYAKU fork only: launch the isolated yoyaku-lordsquire
+                         Release tag signed out, without dogfood credentials.
+                         Cloud authentication remains unchanged.
   --credentials-file <path>
                          Bake only the path to a current-user-owned 0600 auth file.
                          The credential values never enter argv, Info.plist, or
@@ -1286,6 +1290,10 @@ while [[ $# -gt 0 ]]; do
       BUILD_CONFIGURATION="Release"
       shift
       ;;
+    --local-only)
+      YOYAKU_LOCAL_ONLY=1
+      shift
+      ;;
     --credentials-file)
       AUTH_CREDENTIALS_FILE="${2:-}"
       if [[ -z "$AUTH_CREDENTIALS_FILE" ]]; then
@@ -1377,10 +1385,22 @@ if [[ "$BUILD_ONLY" -eq 1 && "$NAME_SET" -eq 1 && "$APP_NAME" == "$PRODUCT_APP_N
   exit 1
 fi
 
+if [[ "$YOYAKU_LOCAL_ONLY" -eq 1 ]]; then
+  if [[ "$NAME_SET" -eq 0 ]]; then
+    APP_NAME="CMUX YOYAKU"
+    NAME_SET=1
+  fi
+  source "$SCRIPT_DIR/yoyaku/local-launch.sh"
+  cmux_yoyaku_local_launch_policy "$TAG" "$BUILD_CONFIGURATION" "$PROD_AUTH" \
+    "$AUTH_CREDENTIALS_FILE" "$AUTH_PROFILE" "$AUTH_EXPECTED_ACCOUNT" "$APP_NAME" "$BUNDLE_SET" || exit 2
+  NO_GLOBAL_CLI_LINKS=1
+  export CMUX_DEV_BACKEND_MODE=local CMUX_DEV_CLOUD_ENABLED=0
+fi
+
 # A tagged launch is a dogfood surface, so it must have an explicit identity
 # before the app is started.  Keeping this gate here covers agents that call
 # reload.sh directly instead of the higher-level dev-setup wrapper.
-if [[ "$LAUNCH" -eq 1 && -n "$TAG" && -z "$AUTH_PROFILE" ]]; then
+if [[ "$LAUNCH" -eq 1 && -n "$TAG" && -z "$AUTH_PROFILE" && "$YOYAKU_LOCAL_ONLY" -ne 1 ]]; then
   AUTH_PROFILE="personal"
   if [[ -z "$AUTH_CREDENTIALS_FILE" ]]; then
     for candidate in "${HOME:-}/.secrets/cmuxterm-dev.env" "${HOME:-}/.secrets/cmux.env"; do
@@ -2005,6 +2025,9 @@ if [[ -n "$TAG" && "$APP_NAME" != "$SEARCH_APP_NAME" ]]; then
       set_plist_env "$INFO_PLIST" CMUX_SOCKET_PATH "$CMUX_SOCKET_PATH_VALUE"
       set_plist_env "$INFO_PLIST" CMUX_DEBUG_LOG "$CMUX_DEBUG_LOG"
       set_plist_env "$INFO_PLIST" CMUX_TAG "$TAG_SLUG"
+      if [[ "$YOYAKU_LOCAL_ONLY" -eq 1 ]]; then
+        python3 "$SCRIPT_DIR/yoyaku/local-artifact.py" "$INFO_PLIST" "$PWD"
+      fi
       # Keep Cloud dogfood policy in the artifact so Finder and HQ cache
       # restores enable both gates on the Mac that actually launches it.
       # The app additionally requires a compiled Debug identity before using it.

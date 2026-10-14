@@ -24,10 +24,12 @@ public struct CmuxConfigLocation: Sendable, Hashable {
     /// - Parameter home: The home directory to anchor paths to. Defaults to
     ///   `FileManager.default.homeDirectoryForCurrentUser`. Pass a temp URL
     ///   in tests.
-    public init(home: URL = FileManager.default.homeDirectoryForCurrentUser) {
+    public init(home: URL = FileManager.default.homeDirectoryForCurrentUser,
+                bundleIdentifier: String? = Bundle.main.bundleIdentifier) {
         // `URL.appending(path:)` is the modern Foundation API (macOS 13+);
         // returns a non-optional URL without the legacy `isDirectory` flag.
-        self.userConfigFile = home.appending(path: ".config/cmux/cmux.json")
-        self.legacyFallbackFile = home.appending(path: ".config/cmux/settings.json")
+        let directory = bundleIdentifier == "com.cmuxterm.app.debug.yoyaku.lordsquire" ? "cmux-yoyaku" : "cmux"
+        self.userConfigFile = home.appending(path: ".config/\(directory)/cmux.json")
+        self.legacyFallbackFile = home.appending(path: ".config/\(directory)/settings.json")
     }
 }

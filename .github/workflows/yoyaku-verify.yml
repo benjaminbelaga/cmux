@@ -1,0 +1,75 @@
+name: YOYAKU verification
+run-name: YOYAKU ${{ github.sha }}
+on:
+  workflow_dispatch:
+  pull_request:
+    branches: [yoyaku/lordsquire]
+permissions:
+  contents: read
+concurrency:
+  group: yoyaku-verify-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  focused-native:
+    if: github.repository == 'benjaminbelaga/cmux'
+    runs-on: macos-26
+    timeout-minutes: 90
+    env:
+      CMUX_APP_HOST_SHARD: '0'
+      CMUX_CI_APP_HOST_ISOLATION_REQUIRED: '1'
+      CMUX_GHOSTTYKIT_PREPROVISIONED: '1'
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          fetch-depth: 0
+          submodules: recursive
+          persist-credentials: false
+      - name: Record immutable inputs
+        run: |
+          mkdir -p .build/yoyaku-evidence
+          git rev-parse HEAD | tee .build/yoyaku-evidence/source-sha.txt
+          git status --porcelain | tee .build/yoyaku-evidence/source-status.txt
+          test ! -s .build/yoyaku-evidence/source-status.txt
+      - name: Select compatible Xcode
+        run: ./scripts/select-ci-xcode.sh
+      - name: Scoped source and launch-policy checks
+        run: bash scripts/yoyaku/verify.sh
+      - name: Prepare public native inputs
+        run: |
+          ./scripts/download-prebuilt-ghosttykit.sh
+          xcrun metal --version || xcodebuild -downloadComponent MetalToolchain
+          command -v rustup
+          rustup show
+          xcodebuild -version | tee .build/yoyaku-evidence/xcode.txt
+      - name: Prepare isolated app host
+        run: ./scripts/ci/prepare-app-host-home.sh
+      - name: Verify local configuration separation
+        shell: bash
+        run: |
+          set -o pipefail
+          swift test --package-path Packages/macOS/CmuxSettings \
+            --filter CmuxYOYAKUConfigLocationTests \
+            | tee .build/yoyaku-evidence/config-tests.log
+          ./scripts/ci/require_selected_test_execution.sh \
+            .build/yoyaku-evidence/config-tests.log CmuxYOYAKUConfigLocationTests
+      - name: Execute the real workspace regression
+        shell: bash
+        run: |
+          set -o pipefail
+          ./scripts/ci/run-app-host-xcodebuild.sh \
+            -project cmux.xcodeproj -scheme cmux-unit -configuration Debug \
+            -destination platform=macOS -derivedDataPath "$RUNNER_TEMP/yoyaku-tests" \
+            -resultBundlePath "$RUNNER_TEMP/yoyaku-tests.xcresult" \
+            -only-testing:cmuxTests/SidebarNewLocalWorkspaceTests test \
+            | tee .build/yoyaku-evidence/native-tests.log
+          ./scripts/ci/require_selected_test_execution.sh \
+            .build/yoyaku-evidence/native-tests.log cmuxTests/SidebarNewLocalWorkspaceTests
+          xcrun xcresulttool get test-results summary \
+            --path "$RUNNER_TEMP/yoyaku-tests.xcresult" > .build/yoyaku-evidence/result.json
+      - name: Preserve evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: yoyaku-verification-${{ github.sha }}
+          path: .build/yoyaku-evidence
+          if-no-files-found: error
