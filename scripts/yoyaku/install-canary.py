@@ -158,15 +158,23 @@ def rollback(receipt_path):
     accepted = json.loads((STATE / "accepted.json").read_text())
     if receipt.get("generation") != accepted.get("generation") or receipt.get("bundle_id") != IDENTITY:
         raise ValueError("rollback receipt is not the current canary generation")
-    backup = Path(receipt.get("backup") or "/nonexistent")
-    if backup.parent.resolve() != (STATE / "backups").resolve() or backup.is_symlink():
-        raise ValueError("rollback backup is outside the owned archive")
-    verify_signature(backup)
+    backup_value = receipt.get("backup")
+    backup = Path(backup_value) if backup_value else None
+    if receipt.get("previous") and backup is None:
+        raise ValueError("the previous canary generation has no archived application")
+    if backup is not None:
+        if backup.parent.resolve() != (STATE / "backups").resolve() or backup.is_symlink():
+            raise ValueError("rollback backup is outside the owned archive")
+        verify_signature(backup)
+    verify_signature(DESTINATION)
     stop_owned_canary()
     DESTINATION.replace(STATE / f"rolled-back-{uuid.uuid4().hex}.app")
-    backup.replace(DESTINATION)
+    if backup is not None:
+        backup.replace(DESTINATION)
     if receipt.get("previous"):
         atomic_json(STATE / "accepted.json", receipt["previous"])
+    else:
+        (STATE / "accepted.json").unlink(missing_ok=True)
     print(json.dumps({"restored": True, "bundle_id": IDENTITY}))
 
 

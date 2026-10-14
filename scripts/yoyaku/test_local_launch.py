@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Behavioral checks for the fork's explicit local launch boundary."""
 import importlib.util
+import json
 import pathlib
 import subprocess
 import tempfile
@@ -94,6 +95,27 @@ class LocalLaunchTests(unittest.TestCase):
                   self.assertRaisesRegex(RuntimeError, "fixture signing failure")):
                 installer.install(source, "a" * 40, False)
             self.assertEqual(list(destination.parent.glob(".cmux-yoyaku-*.app")), [])
+
+    def test_first_install_rollback_retires_canary_and_clears_accepted_receipt(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            destination = root / "Applications/CMUX YOYAKU.app"
+            destination.mkdir(parents=True)
+            state = root / "state"
+            state.mkdir()
+            receipt = {"generation": "first", "bundle_id": installer.IDENTITY,
+                       "backup": None, "previous": None}
+            receipt_path = state / "first.json"
+            receipt_path.write_text(json.dumps(receipt))
+            (state / "accepted.json").write_text(json.dumps(receipt))
+            with (patch.object(installer, "DESTINATION", destination),
+                  patch.object(installer, "STATE", state),
+                  patch.object(installer, "verify_signature"),
+                  patch.object(installer, "stop_owned_canary")):
+                installer.rollback(receipt_path)
+            self.assertFalse(destination.exists())
+            self.assertFalse((state / "accepted.json").exists())
+            self.assertEqual(len(list(state.glob("rolled-back-*.app"))), 1)
 
     def test_signed_out_release_needs_no_credential_and_scrubs_fixtures(self):
         self.assertEqual(self.policy(), 0)
