@@ -16,7 +16,7 @@ import Testing
 struct SidebarNewLocalWorkspaceTests {
     @Test func canaryActionsVaultAndConfigEditorUseOnlyTheCanaryConfig() throws {
         let identity = "com.cmuxterm.app.debug.yoyaku.lordsquire"
-        #expect(CmuxConfig.defaultGlobalConfigPath(bundleIdentifier: identity).hasSuffix("/.config/cmux-yoyaku/cmux.json"))
+        #expect(CmuxConfigStore.defaultGlobalConfigPath(bundleIdentifier: identity).hasSuffix("/.config/cmux-yoyaku/cmux.json"))
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: root) }
