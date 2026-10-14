@@ -1059,6 +1059,11 @@ tagged_derived_data_path() {
 resolve_cmux_tui_client_commit() {
   local commit
   local -a resolver_args=()
+  if [[ "$YOYAKU_LOCAL_ONLY" -eq 1 ]]; then
+    local yoyaku_tui_source
+    yoyaku_tui_source="$(cmux_yoyaku_tui_source "$PWD")" || return
+    resolver_args+=(--head "$yoyaku_tui_source")
+  fi
   if [[ -n "${CMUX_TUI_CLIENT_MAX_FALLBACK:-}" ]]; then
     resolver_args+=(--max-fallback "$CMUX_TUI_CLIENT_MAX_FALLBACK")
   fi

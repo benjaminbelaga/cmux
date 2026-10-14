@@ -3,6 +3,8 @@
 import importlib.util
 import pathlib
 import subprocess
+import tempfile
+import shutil
 import unittest
 
 HERE = pathlib.Path(__file__).resolve().parent
@@ -22,6 +24,42 @@ class LocalLaunchTests(unittest.TestCase):
             'test -z "${CMUX_UITEST_STACK_PASSWORD:-}${CMUX_UI_TEST_MODE:-}"',
             "policy", str(HERE / "local-launch.sh"), tag, config, prod, file, profile, account, name, bundle_override],
             capture_output=True, text=True).returncode
+
+    def test_tui_artifact_uses_identical_frozen_upstream_inputs(self):
+        result = subprocess.run(["bash", "-c", 'source "$1"; cmux_yoyaku_tui_source "$2"',
+                                 "source", str(HERE / "local-launch.sh"), str(HERE.parent.parent)],
+                                capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), (HERE / "upstream-base").read_text().strip())
+
+    def test_changed_tui_inputs_cannot_reuse_the_upstream_artifact(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            def git(*args):
+                return subprocess.check_output(["git", "-C", str(root), *args], text=True).strip()
+            git("init", "-q")
+            (root / "cmux-tui").mkdir()
+            (root / "cmux-tui/client").write_text("original")
+            workflows = root / ".github/workflows"
+            workflows.mkdir(parents=True)
+            for name in ["cmux-tui-artifacts.yml", "cmux-tui-build-package.yml"]:
+                (workflows / name).write_text("frozen " + name)
+            git("add", ".")
+            git("-c", "user.name=Fixture", "-c", "user.email=fixture@example.test", "commit", "-qm", "fixture", "--no-verify")
+            (root / "scripts/yoyaku").mkdir(parents=True)
+            (root / "scripts/yoyaku/upstream-base").write_text(git("rev-parse", "HEAD"))
+            archive = root / ".github/upstream-workflows"
+            shutil.copytree(workflows, archive)
+            def accepted():
+                return subprocess.run(["bash", "-c", 'source "$1"; cmux_yoyaku_tui_source "$2"',
+                                       "source", str(HERE / "local-launch.sh"), str(root)],
+                                      capture_output=True).returncode == 0
+            self.assertTrue(accepted())
+            (root / "cmux-tui/client").write_text("changed")
+            self.assertFalse(accepted())
+            git("checkout", "--", "cmux-tui")
+            (archive / "cmux-tui-artifacts.yml").write_text("changed workflow")
+            self.assertFalse(accepted())
 
     def test_signed_out_release_needs_no_credential_and_scrubs_fixtures(self):
         self.assertEqual(self.policy(), 0)

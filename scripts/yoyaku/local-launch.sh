@@ -25,3 +25,22 @@ cmux_yoyaku_local_launch_policy() {
     esac
   done < <(compgen -v)
 }
+
+# The fork archives upstream workflows. Artifact keys include their paths,
+# although the client itself is unchanged. Bind to the frozen upstream source
+# only after checking both runtime inputs and those workflow contents.
+cmux_yoyaku_tui_source() {
+  local root="$1" base name
+  base="$(cat "$root/scripts/yoyaku/upstream-base")" || return
+  git -C "$root" diff --quiet "$base" -- cmux-tui ghostty || {
+    echo 'error: local cmux-tui inputs changed; build and supply a matching client' >&2
+    return 2
+  }
+  for name in cmux-tui-artifacts.yml cmux-tui-build-package.yml; do
+    git -C "$root" show "$base:.github/workflows/$name" | cmp -s - "$root/.github/upstream-workflows/$name" || {
+      echo 'error: archived cmux-tui build inputs differ from the frozen upstream source' >&2
+      return 2
+    }
+  done
+  printf '%s\n' "$base"
+}
