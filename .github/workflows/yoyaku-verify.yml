@@ -13,7 +13,10 @@ jobs:
   focused-native:
     if: github.repository == 'benjaminbelaga/cmux'
     runs-on: macos-26
-    timeout-minutes: 90
+    # A cold focused app-host run still compiles the full macOS app target.
+    # The exact-SHA canary run reached that compilation but exhausted 90 min
+    # before XCTest started; allow the cold app + test build to finish once.
+    timeout-minutes: 240
     env:
       CMUX_APP_HOST_SHARD: '0'
       CMUX_CI_APP_HOST_ISOLATION_REQUIRED: '1'
