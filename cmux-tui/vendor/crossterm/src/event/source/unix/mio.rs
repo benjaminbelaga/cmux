@@ -64,6 +64,68 @@ impl UnixInternalEventSource {
     }
 }
 
+/// Reads the bytes the terminal has ready right now. The real implementation
+/// wraps the terminal descriptor; tests drive the read loop with a fake one,
+/// because a deleted pty cannot be produced on demand.
+trait TtyReadSource {
+    fn read_tty(&self, buffer: &mut [u8]) -> io::Result<usize>;
+}
+
+impl TtyReadSource for FileDesc<'_> {
+    fn read_tty(&self, buffer: &mut [u8]) -> io::Result<usize> {
+        self.read(buffer)
+    }
+}
+
+/// Why one pass of terminal reads ended.
+#[derive(Debug)]
+enum TtyPump {
+    /// The parser produced an event.
+    Event(InternalEvent),
+    /// Nothing more to read right now; wait for the next readiness event.
+    Idle,
+}
+
+/// Feeds the parser with everything the terminal has ready right now.
+///
+/// Stops at the first parsed event, at `WouldBlock`, and at a terminal that is
+/// gone. It never re-reads a terminal that cannot produce input: a hung-up pty
+/// answers every read with `EIO` (or a zero-length read) while mio keeps
+/// reporting it as readable, so retrying spins the caller at 100% CPU for as
+/// long as the process lives instead of letting it exit. `EIO`, `ENXIO` and end
+/// of file are therefore returned as errors, and `Interrupted` is the only
+/// result that reads again.
+fn pump_tty_reads(
+    tty: &impl TtyReadSource,
+    parser: &mut Parser,
+    buffer: &mut [u8],
+) -> io::Result<TtyPump> {
+    loop {
+        match tty.read_tty(buffer) {
+            Ok(0) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    "terminal input reached end of file, the terminal is gone",
+                ))
+            }
+            Ok(read_count) => parser.advance(&buffer[..read_count], read_count == buffer.len()),
+            Err(e) => match e.kind() {
+                // No more data to read at the moment. We will receive another event
+                // once more data is available to read.
+                io::ErrorKind::WouldBlock => return Ok(TtyPump::Idle),
+                io::ErrorKind::Interrupted => continue,
+                // Terminal hang-up: the descriptor stays readable forever, so
+                // reading it again is a busy loop.
+                _ => return Err(e),
+            },
+        }
+
+        if let Some(event) = parser.next() {
+            return Ok(TtyPump::Event(event));
+        }
+    }
+}
+
 impl EventSource for UnixInternalEventSource {
     fn try_read(&mut self, timeout: Option<Duration>) -> io::Result<Option<InternalEvent>> {
         if let Some(event) = self.parser.next() {
@@ -92,31 +154,10 @@ impl EventSource for UnixInternalEventSource {
             for token in self.events.iter().map(|x| x.token()) {
                 match token {
                     TTY_TOKEN => {
-                        loop {
-                            match self.tty_fd.read(&mut self.tty_buffer) {
-                                Ok(read_count) => {
-                                    if read_count > 0 {
-                                        self.parser.advance(
-                                            &self.tty_buffer[..read_count],
-                                            read_count == TTY_BUFFER_SIZE,
-                                        );
-                                    }
-                                }
-                                Err(e) => {
-                                    // No more data to read at the moment. We will receive another event
-                                    if e.kind() == io::ErrorKind::WouldBlock {
-                                        break;
-                                    }
-                                    // once more data is available to read.
-                                    else if e.kind() == io::ErrorKind::Interrupted {
-                                        continue;
-                                    }
-                                }
-                            };
-
-                            if let Some(event) = self.parser.next() {
-                                return Ok(Some(event));
-                            }
+                        match pump_tty_reads(&self.tty_fd, &mut self.parser, &mut self.tty_buffer)?
+                        {
+                            TtyPump::Event(event) => return Ok(Some(event)),
+                            TtyPump::Idle => {}
                         }
                     }
                     SIGNAL_TOKEN => {
@@ -225,5 +266,149 @@ impl Iterator for Parser {
 
     fn next(&mut self) -> Option<Self::Item> {
         self.internal_events.pop_front()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{
+        cell::Cell,
+        io,
+        io::ErrorKind,
+        sync::atomic::{AtomicUsize, Ordering},
+    };
+
+    use super::{pump_tty_reads, Parser, TtyPump};
+
+    /// The kernel answer for every read of a hung-up pty. It is not
+    /// `WouldBlock`, and mio keeps the descriptor readable, so the read loop
+    /// used to come back here forever.
+    fn deleted_pty_error() -> io::Error {
+        io::Error::from_raw_os_error(5)
+    }
+
+    /// Replays a scripted sequence of read results and counts how many times
+    /// the loop read, which is what "not spin" means.
+    struct ScriptedTty {
+        results: std::cell::RefCell<std::vec::IntoIter<io::Result<usize>>>,
+        reads: Cell<usize>,
+    }
+
+    impl ScriptedTty {
+        fn new(results: Vec<io::Result<usize>>) -> Self {
+            ScriptedTty {
+                results: std::cell::RefCell::new(results.into_iter()),
+                reads: Cell::new(0),
+            }
+        }
+    }
+
+    impl super::TtyReadSource for ScriptedTty {
+        fn read_tty(&self, _buffer: &mut [u8]) -> io::Result<usize> {
+            self.reads.set(self.reads.get() + 1);
+            match self.results.borrow_mut().next() {
+                Some(result) => result,
+                // A terminal that keeps answering `WouldBlock` is the end of
+                // every scripted scenario, so a loop that reads past its
+                // script is reported as idle rather than panicking.
+                None => Err(io::Error::from(ErrorKind::WouldBlock)),
+            }
+        }
+    }
+
+    fn pump(tty: &ScriptedTty) -> (io::Result<TtyPump>, usize) {
+        let mut parser = Parser::default();
+        let mut buffer = [0u8; super::TTY_BUFFER_SIZE];
+        let result = pump_tty_reads(tty, &mut parser, &mut buffer);
+        (result, tty.reads.get())
+    }
+
+    #[test]
+    fn would_block_waits_for_the_next_readiness_event_without_reading_again() {
+        let tty = ScriptedTty::new(vec![Err(io::Error::from(ErrorKind::WouldBlock))]);
+        let (result, reads) = pump(&tty);
+        assert!(matches!(result, Ok(TtyPump::Idle)), "{result:?}");
+        assert_eq!(reads, 1, "`WouldBlock` must not read again");
+    }
+
+    #[test]
+    fn interrupted_reads_again() {
+        let tty = ScriptedTty::new(vec![
+            Err(io::Error::from(ErrorKind::Interrupted)),
+            Err(io::Error::from(ErrorKind::WouldBlock)),
+        ]);
+        let (result, reads) = pump(&tty);
+        assert!(matches!(result, Ok(TtyPump::Idle)), "{result:?}");
+        assert_eq!(reads, 2, "`Interrupted` must retry exactly once");
+    }
+
+    /// The regression: a client whose terminal disappeared used to re-read
+    /// forever, one `EIO` per loop iteration. That is how an orphaned
+    /// `cmux-tui attach` client burned about 90% of a core for a day. One
+    /// `EIO` must end the loop with an error.
+    #[test]
+    fn eio_from_a_deleted_terminal_ends_the_read_loop() {
+        let tty = ScriptedTty::new(vec![Err(deleted_pty_error())]);
+        let (result, reads) = pump(&tty);
+        let error = result.expect_err("`EIO` must end the read loop with an error");
+        assert_eq!(error.raw_os_error(), Some(5), "{error:?}");
+        assert_eq!(reads, 1, "`EIO` must not read again");
+    }
+
+    /// A hang-up also shows up as a zero-length read, which is neither
+    /// `WouldBlock` nor an error and must end the loop too.
+    #[test]
+    fn end_of_file_ends_the_read_loop() {
+        let tty = ScriptedTty::new(vec![Ok(0)]);
+        let (result, reads) = pump(&tty);
+        let error = result.expect_err("end of file must end the read loop with an error");
+        assert_eq!(error.kind(), ErrorKind::UnexpectedEof, "{error:?}");
+        assert_eq!(reads, 1, "end of file must not read again");
+    }
+
+    /// Any other terminal read failure means the same thing: the terminal is
+    /// unusable, so the loop must not keep reading it.
+    #[test]
+    fn other_read_errors_end_the_read_loop() {
+        for kind in [ErrorKind::BrokenPipe, ErrorKind::ConnectionReset, ErrorKind::NotConnected] {
+            let tty = ScriptedTty::new(vec![Err(io::Error::new(kind, "terminal hangup"))]);
+            let (result, reads) = pump(&tty);
+            assert_eq!(
+                result.expect_err("`{kind:?}` must end the read loop").kind(),
+                kind,
+                "`{kind:?}` must be surfaced unchanged"
+            );
+            assert_eq!(reads, 1, "`{kind:?}` must not read again");
+        }
+    }
+
+    #[test]
+    fn bytes_read_reach_the_parser_and_stop_the_loop() {
+        /// Answers one real byte, then idles. The scripted reader cannot fill
+        /// the buffer, so the byte has to be planted by the reader itself.
+        struct ByteThenIdle {
+            pending_byte: std::cell::Cell<bool>,
+            reads: AtomicUsize,
+        }
+
+        impl super::TtyReadSource for ByteThenIdle {
+            fn read_tty(&self, buffer: &mut [u8]) -> io::Result<usize> {
+                self.reads.fetch_add(1, Ordering::SeqCst);
+                if self.pending_byte.replace(false) {
+                    buffer[0] = b'a';
+                    Ok(1)
+                } else {
+                    Err(io::Error::from(ErrorKind::WouldBlock))
+                }
+            }
+        }
+
+        let tty =
+            ByteThenIdle { pending_byte: std::cell::Cell::new(true), reads: AtomicUsize::new(0) };
+        let mut parser = Parser::default();
+        let mut buffer = [0u8; super::TTY_BUFFER_SIZE];
+        let result = pump_tty_reads(&tty, &mut parser, &mut buffer);
+        assert!(matches!(result, Ok(TtyPump::Event(_))), "{result:?}");
+        assert_eq!(tty.reads.load(Ordering::SeqCst), 1, "the event stops the loop");
     }
 }
