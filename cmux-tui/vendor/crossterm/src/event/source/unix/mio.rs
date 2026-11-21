@@ -92,31 +92,11 @@ impl EventSource for UnixInternalEventSource {
             for token in self.events.iter().map(|x| x.token()) {
                 match token {
                     TTY_TOKEN => {
-                        loop {
-                            match self.tty_fd.read(&mut self.tty_buffer) {
-                                Ok(read_count) => {
-                                    if read_count > 0 {
-                                        self.parser.advance(
-                                            &self.tty_buffer[..read_count],
-                                            read_count == TTY_BUFFER_SIZE,
-                                        );
-                                    }
-                                }
-                                Err(e) => {
-                                    // No more data to read at the moment. We will receive another event
-                                    if e.kind() == io::ErrorKind::WouldBlock {
-                                        break;
-                                    }
-                                    // once more data is available to read.
-                                    else if e.kind() == io::ErrorKind::Interrupted {
-                                        continue;
-                                    }
-                                }
-                            };
-
-                            if let Some(event) = self.parser.next() {
-                                return Ok(Some(event));
-                            }
+                        let Self { tty_fd, tty_buffer, parser, .. } = self;
+                        if let Some(event) =
+                            read_tty_until_idle(|buffer| tty_fd.read(buffer), tty_buffer, parser)?
+                        {
+                            return Ok(Some(event));
                         }
                     }
                     SIGNAL_TOKEN => {
@@ -156,6 +136,42 @@ impl EventSource for UnixInternalEventSource {
     fn waker(&self) -> Waker {
         self.waker.clone()
     }
+}
+
+/// Drains the terminal until it would block, returning the first parsed event.
+///
+/// `read` reports readiness, so it is only called while the descriptor is
+/// readable. A terminal whose PTY has disappeared stays readable forever while
+/// every read returns `EIO`/`ENXIO` (or `0` for EOF): without treating those as
+/// errors this loop spins at full CPU and the caller never regains control, so
+/// an attach client whose SSH session dropped burns a core instead of exiting.
+fn read_tty_until_idle(
+    mut read: impl FnMut(&mut [u8]) -> io::Result<usize>,
+    buffer: &mut [u8; TTY_BUFFER_SIZE],
+    parser: &mut Parser,
+) -> io::Result<Option<InternalEvent>> {
+    loop {
+        match read(buffer) {
+            Ok(0) => return Err(end_of_input()),
+            Ok(read_count) => {
+                parser.advance(&buffer[..read_count], read_count == TTY_BUFFER_SIZE);
+            }
+            // No more data to read at the moment. We will receive another event
+            // once more data is available to read.
+            Err(e) if e.kind() == io::ErrorKind::WouldBlock => return Ok(None),
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+            Err(e) => return Err(e),
+        }
+
+        if let Some(event) = parser.next() {
+            return Ok(Some(event));
+        }
+    }
+}
+
+/// EOF from the terminal: the reading end is gone, not merely idle.
+fn end_of_input() -> io::Error {
+    io::Error::new(io::ErrorKind::UnexpectedEof, "terminal input reached end of file")
 }
 
 //
@@ -225,5 +241,90 @@ impl Iterator for Parser {
 
     fn next(&mut self) -> Option<Self::Item> {
         self.internal_events.pop_front()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io;
+
+    use super::{end_of_input, read_tty_until_idle, Parser, TTY_BUFFER_SIZE};
+
+    /// Reproduces a vanished PTY without a real one: the descriptor stays
+    /// readable and every read fails with `EIO`.
+    #[test]
+    fn tty_read_returns_eio_instead_of_spinning() {
+        let mut buffer = [0u8; TTY_BUFFER_SIZE];
+        let mut parser = Parser::default();
+        let mut reads = 0;
+
+        let result = read_tty_until_idle(
+            |_| {
+                reads += 1;
+                assert!(reads < 3, "terminal read was retried after EIO");
+                Err(io::Error::from_raw_os_error(5))
+            },
+            &mut buffer,
+            &mut parser,
+        );
+
+        assert_eq!(result.unwrap_err().raw_os_error(), Some(5));
+        assert_eq!(reads, 1);
+    }
+
+    #[test]
+    fn tty_read_returns_error_on_end_of_file() {
+        let mut buffer = [0u8; TTY_BUFFER_SIZE];
+        let mut parser = Parser::default();
+        let mut reads = 0;
+
+        let result = read_tty_until_idle(
+            |_| {
+                reads += 1;
+                assert!(reads < 3, "terminal read was retried after EOF");
+                Ok(0)
+            },
+            &mut buffer,
+            &mut parser,
+        );
+
+        assert_eq!(result.unwrap_err().kind(), end_of_input().kind());
+        assert_eq!(reads, 1);
+    }
+
+    #[test]
+    fn tty_read_stops_at_would_block() {
+        let mut buffer = [0u8; TTY_BUFFER_SIZE];
+        let mut parser = Parser::default();
+
+        let result = read_tty_until_idle(
+            |_| Err(io::Error::from(io::ErrorKind::WouldBlock)),
+            &mut buffer,
+            &mut parser,
+        );
+
+        assert!(matches!(result, Ok(None)));
+    }
+
+    #[test]
+    fn tty_read_retries_after_interrupt() {
+        let mut buffer = [0u8; TTY_BUFFER_SIZE];
+        let mut parser = Parser::default();
+        let mut reads = 0;
+
+        let result = read_tty_until_idle(
+            |_| {
+                reads += 1;
+                if reads == 1 {
+                    return Err(io::Error::from(io::ErrorKind::Interrupted));
+                }
+                Err(io::Error::from(io::ErrorKind::WouldBlock))
+            },
+            &mut buffer,
+            &mut parser,
+        );
+
+        assert!(matches!(result, Ok(None)));
+        assert_eq!(reads, 2);
     }
 }
