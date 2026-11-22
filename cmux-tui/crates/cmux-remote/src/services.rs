@@ -46,6 +46,12 @@ const RPC_CODEC_OFFLOAD_BYTES: usize = 64 * 1024;
 const RPC_ERROR_CODEC_OFFLOAD_BYTES: usize = RPC_CODEC_OFFLOAD_BYTES / 8;
 const COPY_CHUNK: usize = 32 * 1024;
 const MAX_ACTIVE_SERVICE_STREAMS: usize = 64;
+// Every MuxControl stream owns a socket on the same local mux. The mux has
+// 64 ordinary permits, also used by local attachments, renderer grants and
+// lifecycle probes. Share this limit across all remote sessions.
+// These two budgets leave room for the sidecar's single lifetime monitor.
+const MAX_DAEMON_MUX_CONTROL_STREAMS: usize = 27;
+const MAX_DAEMON_RENDERER_HANDSHAKES: usize = 4;
 const MAX_INTERACTIVE_RPC_REQUESTS: usize = 32;
 const MAX_CONTROL_RPC_REQUESTS: usize = 48;
 const MAX_BULK_RPC_REQUESTS: usize = 48;
@@ -255,6 +261,8 @@ pub struct DaemonServices {
     workspace: WorkspaceService,
     mux_socket: Option<PathBuf>,
     mux_upload_budget: MuxUploadBudget,
+    mux_control_slots: Arc<Semaphore>,
+    renderer_handshakes: Arc<Semaphore>,
 }
 
 fn validate_renderer_host_hello(
@@ -294,7 +302,13 @@ fn validate_renderer_host_hello(
 
 impl DaemonServices {
     pub fn new(workspace: WorkspaceService, mux_socket: Option<PathBuf>) -> Arc<Self> {
-        Arc::new(Self { workspace, mux_socket, mux_upload_budget: MuxUploadBudget::new() })
+        Arc::new(Self {
+            workspace,
+            mux_socket,
+            mux_upload_budget: MuxUploadBudget::new(),
+            mux_control_slots: Arc::new(Semaphore::new(MAX_DAEMON_MUX_CONTROL_STREAMS)),
+            renderer_handshakes: Arc::new(Semaphore::new(MAX_DAEMON_RENDERER_HANDSHAKES)),
+        })
     }
 
     pub async fn run(self: Arc<Self>, clients: mpsc::Receiver<Arc<ServerConnection>>) {
@@ -443,12 +457,28 @@ impl DaemonServices {
                     .await
             }
             Service::TerminalBytes => {
-                Self::serve_terminal_bytes(mux_socket, incoming.stream, incoming.metadata).await
+                Self::serve_terminal_bytes(
+                    mux_socket,
+                    incoming.stream,
+                    incoming.metadata,
+                    self.renderer_handshakes.clone(),
+                )
+                .await
             }
             Service::TcpTunnel => {
                 Self::serve_tcp_tunnel(workspace, incoming.stream, incoming.metadata).await
             }
             Service::MuxControl => {
+                let Ok(_permit) = self.mux_control_slots.clone().try_acquire_owned() else {
+                    incoming
+                        .stream
+                        .reject(
+                            "resource-exhausted".into(),
+                            "too many active mux control streams on this daemon".into(),
+                        )
+                        .await?;
+                    return Ok(());
+                };
                 Self::serve_mux_control_with_budget(mux_socket, incoming.stream, mux_upload_budget)
                     .await
             }
@@ -651,6 +681,7 @@ impl DaemonServices {
         mux_socket: Option<PathBuf>,
         stream: ServiceStream,
         metadata: BTreeMap<String, String>,
+        renderer_handshakes: Arc<Semaphore>,
     ) -> Result<(), ServicesError> {
         let stream = Arc::new(stream);
         let request = match terminal_bytes_metadata(&metadata) {
@@ -667,6 +698,12 @@ impl DaemonServices {
             return Ok(());
         };
 
+        let Ok(permit) = renderer_handshakes.try_acquire_owned() else {
+            stream
+                .reject("resource-exhausted".into(), "too many concurrent renderer grants".into())
+                .await?;
+            return Ok(());
+        };
         let terminal = match tokio::time::timeout(
             TERMINAL_BYTES_HANDSHAKE_TIMEOUT,
             Self::negotiate_terminal_bytes(mux_path, request),
@@ -686,6 +723,8 @@ impl DaemonServices {
             }
         };
 
+        // After negotiation the renderer talks directly to the terminal host.
+        drop(permit);
         send_opened(&stream, Lane::Interactive).await?;
         let (reader, writer) = terminal.into_split();
         pump_stream(stream, reader, writer).await
@@ -791,6 +830,7 @@ impl DaemonServices {
         _mux_socket: Option<PathBuf>,
         stream: ServiceStream,
         _metadata: BTreeMap<String, String>,
+        _renderer_handshakes: Arc<Semaphore>,
     ) -> Result<(), ServicesError> {
         stream
             .reject(
@@ -2161,6 +2201,7 @@ mod tests {
             Some(mux_path),
             incoming.stream,
             incoming.metadata,
+            Arc::new(Semaphore::new(1)),
         ));
 
         let first = client_stream.receive().await.unwrap().unwrap();
@@ -2305,10 +2346,12 @@ mod tests {
             .await
             .unwrap();
         let incoming = daemon_mux.accept().await.unwrap().unwrap();
+        let handshakes = Arc::new(Semaphore::new(1));
         let handler = tokio::spawn(DaemonServices::serve_terminal_bytes(
             Some(mux_path),
             incoming.stream,
             incoming.metadata,
+            handshakes.clone(),
         ));
 
         let opened = client_stream.receive().await.unwrap().unwrap();
@@ -2317,6 +2360,7 @@ mod tests {
             serde_json::from_slice::<ServiceControl>(&opened.payload).unwrap(),
             ServiceControl::Opened { service: Service::TerminalBytes }
         );
+        assert_eq!(handshakes.available_permits(), 1, "an open renderer releases its grant slot");
         let mut received = Vec::with_capacity(proxied.len());
         while received.len() < proxied.len() {
             let chunk = client_stream.receive().await.unwrap().unwrap();
@@ -2355,6 +2399,7 @@ mod tests {
             mux_socket,
             incoming.stream,
             incoming.metadata,
+            Arc::new(Semaphore::new(1)),
         ));
 
         let response =
@@ -2396,6 +2441,33 @@ mod tests {
             "mux control socket is not configured",
         )
         .await;
+    }
+
+    #[tokio::test]
+    async fn saturated_daemon_rejects_mux_control_before_opening_the_socket() {
+        let services = DaemonServices::new(WorkspaceService::new(), None);
+        let held = services
+            .mux_control_slots
+            .clone()
+            .try_acquire_many_owned(MAX_DAEMON_MUX_CONTROL_STREAMS as u32)
+            .unwrap();
+        let (left, right) = endpoint_pair();
+        let client = ServiceMultiplexer::new(left, EndpointRole::Client);
+        let daemon = ServiceMultiplexer::new(right, EndpointRole::Daemon);
+        let stream = client.open(Service::MuxControl, BTreeMap::new()).await.unwrap();
+        let incoming = daemon.accept().await.unwrap().unwrap();
+        let scope =
+            ClientScope::new("control-admission", cmux_remote_protocol::SessionId([12; 16]));
+        services.clone().serve_stream(scope, RequestAdmission::new(), incoming).await.unwrap();
+        let refused = stream.receive().await.unwrap().unwrap();
+        assert!(matches!(
+            serde_json::from_slice::<ServiceControl>(&refused.payload).unwrap(),
+            ServiceControl::Rejected { code, .. } if code == "resource-exhausted"
+        ));
+        drop(held);
+        assert_eq!(services.mux_control_slots.available_permits(), MAX_DAEMON_MUX_CONTROL_STREAMS);
+        client.shutdown().await;
+        daemon.shutdown().await;
     }
 
     async fn assert_process_stream_open_rejected(
