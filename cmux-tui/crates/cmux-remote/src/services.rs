@@ -49,7 +49,9 @@ const MAX_ACTIVE_SERVICE_STREAMS: usize = 64;
 // Every MuxControl stream owns a socket on the same local mux. The mux has
 // 64 ordinary permits, also used by local attachments, renderer grants and
 // lifecycle probes. Share this limit across all remote sessions.
-const MAX_DAEMON_MUX_CONTROL_STREAMS: usize = 32;
+// These two budgets leave room for the sidecar's single lifetime monitor.
+const MAX_DAEMON_MUX_CONTROL_STREAMS: usize = 27;
+const MAX_DAEMON_RENDERER_HANDSHAKES: usize = 4;
 const MAX_INTERACTIVE_RPC_REQUESTS: usize = 32;
 const MAX_CONTROL_RPC_REQUESTS: usize = 48;
 const MAX_BULK_RPC_REQUESTS: usize = 48;
@@ -260,6 +262,7 @@ pub struct DaemonServices {
     mux_socket: Option<PathBuf>,
     mux_upload_budget: MuxUploadBudget,
     mux_control_slots: Arc<Semaphore>,
+    renderer_handshakes: Arc<Semaphore>,
 }
 
 fn validate_renderer_host_hello(
@@ -304,6 +307,7 @@ impl DaemonServices {
             mux_socket,
             mux_upload_budget: MuxUploadBudget::new(),
             mux_control_slots: Arc::new(Semaphore::new(MAX_DAEMON_MUX_CONTROL_STREAMS)),
+            renderer_handshakes: Arc::new(Semaphore::new(MAX_DAEMON_RENDERER_HANDSHAKES)),
         })
     }
 
@@ -453,7 +457,13 @@ impl DaemonServices {
                     .await
             }
             Service::TerminalBytes => {
-                Self::serve_terminal_bytes(mux_socket, incoming.stream, incoming.metadata).await
+                Self::serve_terminal_bytes(
+                    mux_socket,
+                    incoming.stream,
+                    incoming.metadata,
+                    self.renderer_handshakes.clone(),
+                )
+                .await
             }
             Service::TcpTunnel => {
                 Self::serve_tcp_tunnel(workspace, incoming.stream, incoming.metadata).await
@@ -671,6 +681,7 @@ impl DaemonServices {
         mux_socket: Option<PathBuf>,
         stream: ServiceStream,
         metadata: BTreeMap<String, String>,
+        renderer_handshakes: Arc<Semaphore>,
     ) -> Result<(), ServicesError> {
         let stream = Arc::new(stream);
         let request = match terminal_bytes_metadata(&metadata) {
@@ -687,6 +698,12 @@ impl DaemonServices {
             return Ok(());
         };
 
+        let Ok(permit) = renderer_handshakes.try_acquire_owned() else {
+            stream
+                .reject("resource-exhausted".into(), "too many concurrent renderer grants".into())
+                .await?;
+            return Ok(());
+        };
         let terminal = match tokio::time::timeout(
             TERMINAL_BYTES_HANDSHAKE_TIMEOUT,
             Self::negotiate_terminal_bytes(mux_path, request),
@@ -706,6 +723,8 @@ impl DaemonServices {
             }
         };
 
+        // After negotiation the renderer talks directly to the terminal host.
+        drop(permit);
         send_opened(&stream, Lane::Interactive).await?;
         let (reader, writer) = terminal.into_split();
         pump_stream(stream, reader, writer).await
@@ -811,6 +830,7 @@ impl DaemonServices {
         _mux_socket: Option<PathBuf>,
         stream: ServiceStream,
         _metadata: BTreeMap<String, String>,
+        _renderer_handshakes: Arc<Semaphore>,
     ) -> Result<(), ServicesError> {
         stream
             .reject(
@@ -2181,6 +2201,7 @@ mod tests {
             Some(mux_path),
             incoming.stream,
             incoming.metadata,
+            Arc::new(Semaphore::new(1)),
         ));
 
         let first = client_stream.receive().await.unwrap().unwrap();
@@ -2325,10 +2346,12 @@ mod tests {
             .await
             .unwrap();
         let incoming = daemon_mux.accept().await.unwrap().unwrap();
+        let handshakes = Arc::new(Semaphore::new(1));
         let handler = tokio::spawn(DaemonServices::serve_terminal_bytes(
             Some(mux_path),
             incoming.stream,
             incoming.metadata,
+            handshakes.clone(),
         ));
 
         let opened = client_stream.receive().await.unwrap().unwrap();
@@ -2337,6 +2360,7 @@ mod tests {
             serde_json::from_slice::<ServiceControl>(&opened.payload).unwrap(),
             ServiceControl::Opened { service: Service::TerminalBytes }
         );
+        assert_eq!(handshakes.available_permits(), 1, "an open renderer releases its grant slot");
         let mut received = Vec::with_capacity(proxied.len());
         while received.len() < proxied.len() {
             let chunk = client_stream.receive().await.unwrap().unwrap();
@@ -2375,6 +2399,7 @@ mod tests {
             mux_socket,
             incoming.stream,
             incoming.metadata,
+            Arc::new(Semaphore::new(1)),
         ));
 
         let response =
