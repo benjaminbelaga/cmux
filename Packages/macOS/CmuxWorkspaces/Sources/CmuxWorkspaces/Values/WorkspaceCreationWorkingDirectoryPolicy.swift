@@ -1,4 +1,5 @@
 public import Foundation
+internal import Darwin
 
 /// Selects the concrete working directory for a newly created workspace.
 public struct WorkspaceCreationWorkingDirectoryPolicy: Sendable {
@@ -27,27 +28,35 @@ public struct WorkspaceCreationWorkingDirectoryPolicy: Sendable {
     }
 
     /// Allocates a workspace-specific directory without changing an existing entry.
-    public static func createNeutralDirectory(
-        under home: URL,
-        workspaceID: UUID,
-        fileManager: FileManager = .default
-    ) throws -> URL {
+    public static func createNeutralDirectory(under home: URL, workspaceID: UUID) throws -> URL {
         let root = neutralRoot(under: home)
-        let permissions: [FileAttributeKey: Any] = [.posixPermissions: 0o700]
-        do {
-            try fileManager.createDirectory(at: root, withIntermediateDirectories: false, attributes: permissions)
-        } catch let error as CocoaError where error.code == .fileWriteFileExists {
-            // Another workspace may already have created the common parent.
-        }
-        let attributes = try fileManager.attributesOfItem(atPath: root.path)
-        guard attributes[.type] as? FileAttributeType == .typeDirectory,
-              (attributes[.ownerAccountID] as? NSNumber)?.uint32Value == getuid(),
-              (attributes[.posixPermissions] as? NSNumber)?.intValue == 0o700 else {
+        let privateMode: mode_t = 0o700
+        if mkdir(root.path, privateMode) != 0, errno != EEXIST {
             throw CocoaError(.fileWriteNoPermission, userInfo: [NSFilePathErrorKey: root.path])
         }
+        let parent = open(root.path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+        guard parent >= 0 else {
+            throw CocoaError(.fileWriteNoPermission, userInfo: [NSFilePathErrorKey: root.path])
+        }
+        defer { _ = close(parent) }
+
+        var parentInfo = stat()
+        guard fstat(parent, &parentInfo) == 0,
+              parentInfo.st_uid == getuid(), parentInfo.st_mode & 0o777 == privateMode else {
+            throw CocoaError(.fileWriteNoPermission, userInfo: [NSFilePathErrorKey: root.path])
+        }
+
         let name = "session-\(workspaceID.uuidString.lowercased())"
         let directory = root.appendingPathComponent(name, isDirectory: true)
-        try fileManager.createDirectory(at: directory, withIntermediateDirectories: false, attributes: permissions)
+        if mkdirat(parent, name, privateMode) != 0 {
+            let code: CocoaError.Code = errno == EEXIST ? .fileWriteFileExists : .fileWriteNoPermission
+            throw CocoaError(code, userInfo: [NSFilePathErrorKey: directory.path])
+        }
+        var namedParentInfo = stat()
+        guard lstat(root.path, &namedParentInfo) == 0,
+              namedParentInfo.st_dev == parentInfo.st_dev, namedParentInfo.st_ino == parentInfo.st_ino else {
+            throw CocoaError(.fileWriteNoPermission, userInfo: [NSFilePathErrorKey: root.path])
+        }
         return directory
     }
 
