@@ -1413,12 +1413,21 @@ class TabManager: ObservableObject {
             !isFinalizedForWindowClose,
             "Initial workspace creation requires an active window manager"
         )
-        guard addWorkspaceIfActive(
+        if addWorkspaceIfActive(
             title: title,
             titleSource: titleSource,
             workingDirectory: workingDirectory,
             initialTerminalInput: initialTerminalInput,
             autoWelcomeIfNeeded: autoWelcomeIfNeeded
+        ) != nil {
+            return
+        }
+        // A filesystem failure must not prevent the window manager from initializing.
+        guard namedNeutralWorkspaces, addWorkspaceIfActive(
+            title: title,
+            titleSource: titleSource,
+            workingDirectory: FileManager.default.temporaryDirectory.path,
+            autoWelcomeIfNeeded: false
         ) != nil else {
             preconditionFailure("Initial workspace creation failed for an active window manager")
         }
@@ -1497,6 +1506,8 @@ class TabManager: ObservableObject {
                     )
                 } catch {
                     NSLog("Could not create a private neutral workspace directory: %@", error.localizedDescription)
+                    if select { NSSound.beep() }
+                    return nil
                 }
             }
             let workingDirectory = WorkspaceCreationWorkingDirectoryPolicy(
@@ -1504,8 +1515,7 @@ class TabManager: ObservableObject {
             ).resolve(
                 explicitWorkingDirectory: explicitWorkingDirectory,
                 inheritedWorkingDirectory: snapshot.preferredWorkingDirectory,
-                defaultWorkingDirectory: usesNeutralDirectory
-                    ? (neutralDirectory?.path ?? "/") : defaultWorkspaceWorkingDirectoryProvider()
+                defaultWorkingDirectory: neutralDirectory?.path ?? defaultWorkspaceWorkingDirectoryProvider()
             )
             let inheritedConfig = workspaceCreationConfigTemplate(
                 inheritedTerminalFontSizeLineage: snapshot.inheritedTerminalFontSizeLineage
@@ -1516,14 +1526,15 @@ class TabManager: ObservableObject {
             let insertIndex = newTabInsertIndex(snapshot: snapshot, placementOverride: placementOverride)
             var welcomeDelivery: WelcomeBannerDelivery?
             var resolvedInitialTerminalEnvironment = initialTerminalEnvironment
+            var resolvedWorkspaceEnvironment = workspaceEnvironment
             if let neutralDirectory {
                 let root = neutralDirectory.deletingLastPathComponent().path
-                let existing = initialTerminalEnvironment["GIT_CEILING_DIRECTORIES"]
-                    ?? workspaceEnvironment["GIT_CEILING_DIRECTORIES"]
-                    ?? ProcessInfo.processInfo.environment["GIT_CEILING_DIRECTORIES"]
-                resolvedInitialTerminalEnvironment["GIT_CEILING_DIRECTORIES"] = existing.map {
-                    $0.isEmpty ? root : "\(root):\($0)"
-                } ?? root
+                let key = "GIT_CEILING_DIRECTORIES"
+                let existing = workspaceEnvironment[key] ?? ProcessInfo.processInfo.environment[key]
+                resolvedWorkspaceEnvironment[key] = existing.flatMap { $0.isEmpty ? nil : "\(root):\($0)" } ?? root
+                if let surfaceCeiling = initialTerminalEnvironment[key] {
+                    resolvedInitialTerminalEnvironment[key] = surfaceCeiling.isEmpty ? root : "\(root):\(surfaceCeiling)"
+                }
             }
             // An explicit command runs via `shell -lc`, which never loads cmux's
             // interactive shell integration, so it could not print the banner.
@@ -1571,7 +1582,7 @@ class TabManager: ObservableObject {
                 initialBrowserURL: initialBrowserURL,
                 initialBrowserOmnibarVisible: initialBrowserOmnibarVisible,
                 initialBrowserTransparentBackground: initialBrowserTransparentBackground,
-                workspaceEnvironment: workspaceEnvironment,
+                workspaceEnvironment: resolvedWorkspaceEnvironment,
                 allowTextBoxFocusDefault: select && allowTextBoxFocusDefault
             )
             applyCreationChromeInheritance(

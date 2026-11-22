@@ -147,7 +147,9 @@ extension CmuxConfigExecutor {
             }
         }
 
-        let resolvedCwd = CmuxConfigStore.resolveCwd(wsDef.cwd, relativeTo: baseCwd)
+        let configuredCwd = wsDef.cwd?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let resolvedCwd = tabManager.namedNeutralWorkspaces && (configuredCwd?.isEmpty ?? true)
+            ? nil : CmuxConfigStore.resolveCwd(wsDef.cwd, relativeTo: baseCwd)
         guard let newWorkspace = tabManager.addWorkspaceIfActive(
             title: workspaceName,
             titleSource: .auto,
@@ -167,7 +169,9 @@ extension CmuxConfigExecutor {
         }
 
         if let layout = wsDef.layout {
-            newWorkspace.applyCustomLayout(layout, baseCwd: resolvedCwd, setupCommand: wsDef.setup)
+            newWorkspace.applyCustomLayout(
+                layout, baseCwd: resolvedCwd ?? newWorkspace.currentDirectory, setupCommand: wsDef.setup
+            )
         } else if let setup = wsDef.setup {
             newWorkspace.sendConfigSetupCommand(setup)
         }
