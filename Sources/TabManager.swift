@@ -1503,7 +1503,8 @@ class TabManager: ObservableObject {
                 do {
                     neutralDirectory = try WorkspaceCreationWorkingDirectoryPolicy.createNeutralDirectory(
                         under: FileManager.default.homeDirectoryForCurrentUser,
-                        workspaceID: workspaceID
+                        workspaceID: workspaceID,
+                        title: title
                     )
                 } catch {
                     NSLog("Could not create a private neutral workspace directory: %@", error.localizedDescription)

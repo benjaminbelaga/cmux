@@ -28,7 +28,7 @@ public struct WorkspaceCreationWorkingDirectoryPolicy: Sendable {
     }
 
     /// Allocates a workspace-specific directory without changing an existing entry.
-    public static func createNeutralDirectory(under home: URL, workspaceID: UUID) throws -> URL {
+    public static func createNeutralDirectory(under home: URL, workspaceID: UUID, title: String? = nil) throws -> URL {
         let root = neutralRoot(under: home)
         let privateMode: mode_t = 0o700
         if mkdir(root.path, privateMode) != 0, errno != EEXIST {
@@ -46,7 +46,12 @@ public struct WorkspaceCreationWorkingDirectoryPolicy: Sendable {
             throw CocoaError(.fileWriteNoPermission, userInfo: [NSFilePathErrorKey: root.path])
         }
 
-        let name = "session-\(workspaceID.uuidString.lowercased())"
+        let label = title?.folding(options: .diacriticInsensitive, locale: Locale(identifier: "en_US_POSIX"))
+            .lowercased()
+            .split(whereSeparator: { !$0.isASCII || (!$0.isLetter && !$0.isNumber) })
+            .joined(separator: "-")
+        let prefix = String((label ?? "").prefix(28)).trimmingCharacters(in: CharacterSet(charactersIn: "-"))
+        let name = "\(prefix.isEmpty ? "session" : prefix)-\(workspaceID.uuidString.lowercased())"
         let directory = root.appendingPathComponent(name, isDirectory: true)
         if mkdirat(parent, name, privateMode) != 0 {
             let code: CocoaError.Code = errno == EEXIST ? .fileWriteFileExists : .fileWriteNoPermission

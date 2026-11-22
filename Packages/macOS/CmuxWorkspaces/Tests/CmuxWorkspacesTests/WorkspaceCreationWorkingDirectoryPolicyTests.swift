@@ -44,6 +44,16 @@ import Testing
         }
     }
 
+    @Test func explicitTitleIsReflectedInSafeDirectoryName() throws {
+        let home = try temporaryHome()
+        defer { try? FileManager.default.removeItem(at: home) }
+        let workspaceID = UUID()
+        let directory = try WorkspaceCreationWorkingDirectoryPolicy.createNeutralDirectory(
+            under: home, workspaceID: workspaceID, title: "Préparer / Livraison"
+        )
+        #expect(directory.lastPathComponent == "preparer-livraison-\(workspaceID.uuidString.lowercased())")
+    }
+
     @Test func symlinkParentCannotBecomeNeutralRoot() throws {
         let home = try temporaryHome()
         defer { try? FileManager.default.removeItem(at: home) }
