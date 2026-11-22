@@ -1458,7 +1458,8 @@ class TabManager: ObservableObject {
         autoRefreshMetadata: Bool = true,
         normalizeWorkspaceGroupsAfterInsert: Bool = true,
         applyCreationTitleAsCustomTitle: Bool = true,
-        allowTextBoxFocusDefault: Bool = true
+        allowTextBoxFocusDefault: Bool = true,
+        reserveTaskBeforeStartup: (() -> Bool)? = nil
     ) -> Workspace? {
         guard !isFinalizedForWindowClose else { return nil }
         let sourceWorkspace = selectedWorkspace
@@ -1509,6 +1510,12 @@ class TabManager: ObservableObject {
                     if select { NSSound.beep() }
                     return nil
                 }
+            }
+            if let reserveTaskBeforeStartup, !reserveTaskBeforeStartup() {
+                if let neutralDirectory {
+                    _ = rmdir(neutralDirectory.path)
+                }
+                return nil
             }
             let workingDirectory = WorkspaceCreationWorkingDirectoryPolicy(
                 inheritanceEnabled: inheritanceEnabled
