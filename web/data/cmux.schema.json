@@ -781,6 +781,11 @@
           "descriptionKey": "schemaDescriptions.app.forkConversationDefaultDestination",
           "description": "Default destination for the tab context menu's primary Fork Conversation action. The submenu still exposes every destination."
         },
+        "namedNeutralWorkspaces": {
+          "type": "boolean",
+          "default": false,
+          "description": "Start unassigned terminal workspaces in private, individually named folders under ~/sessions. Explicit working directories continue to take precedence."
+        },
         "workspaceInheritWorkingDirectory": {
           "type": "boolean",
           "default": true,

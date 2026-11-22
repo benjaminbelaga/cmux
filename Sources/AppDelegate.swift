@@ -9013,7 +9013,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         // target: `createWorkspaceInGroup` takes a group placement instead and
         // would drop the override, filing a sidebar empty-area double-click
         // into the selected workspace's group rather than after the last row.
-        let workspaceGroupTarget = placementOverride == nil
+        let usesNeutralWorkspace = initialSurface == .terminal
+            && context?.tabManager.namedNeutralWorkspaces == true
+        let workspaceGroupTarget = placementOverride == nil && !usesNeutralWorkspace
             ? context.flatMap { workspaceGroupNewWorkspaceTarget(in: $0) }
             : nil
 
@@ -9037,6 +9039,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         // Cmd+N/File menu behavior on ordinary local windows.
         if initialSurface == .terminal,
            !forceLocal,
+           !usesNeutralWorkspace,
            let context,
            !hasCustomConfiguredNewWorkspaceAction,
            remoteTmuxController.handleNewWorkspaceRequested(in: context.tabManager) {
