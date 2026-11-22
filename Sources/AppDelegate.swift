@@ -18341,6 +18341,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         case .builtIn(let builtIn):
             switch builtIn {
             case .newWorkspace:
+                if context.tabManager.namedNeutralWorkspaces {
+                    guard context.tabManager.addWorkspaceIfActive() != nil else { return false }
+                    onExecuted?()
+                    return true
+                }
                 if let vmID = context.tabManager.selectedWorkspace?.cloudVMID, !vmID.isEmpty {
                     let didStart = performNewCloudWorkspaceOnCurrentMachineAction(
                         tabManager: context.tabManager, vmID: vmID, destination: destination
