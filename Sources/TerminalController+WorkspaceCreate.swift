@@ -84,23 +84,7 @@ extension TerminalController {
 
         guard let result = tabManager.acquireWorkspaceIfActive({ () -> V2CallResult in
             var newWorkspace: Workspace?
-            if let operationID, !operationAlreadyAccepted {
-                // Acceptance must be durable before addWorkspace constructs a
-                // terminal and can execute the task command. A crash in between
-                // intentionally favors at-most-once startup over workspace recovery.
-                do {
-                    try preparation.idempotencyCache.accept(operationID: operationID)
-                } catch {
-                    workspaceCreateIdempotencyLogger.error(
-                        "Task reservation failed: \(String(describing: error), privacy: .private)"
-                    )
-                    return .err(
-                        code: "persistence_failed",
-                        message: "Workspace task could not be reserved safely",
-                        data: nil
-                    )
-                }
-            }
+            var reservationFailure: V2CallResult?
             v2MainSync {
                 let initialTerminalInput = execution.layoutNode == nil ? execution.initialInput : nil
                 guard let ws = tabManager.addWorkspaceIfActive(
@@ -114,7 +98,26 @@ extension TerminalController {
                     select: execution.shouldFocus,
                     eagerLoadTerminal: execution.shouldEagerLoadTerminal,
                     autoWelcomeIfNeeded: initialTerminalInput == nil,
-                    autoRefreshMetadata: execution.shouldAutoRefreshMetadata
+                    autoRefreshMetadata: execution.shouldAutoRefreshMetadata,
+                    reserveTaskBeforeStartup: {
+                        guard let operationID, !operationAlreadyAccepted else { return true }
+                        // Accept after directory allocation, before constructing a terminal.
+                        // A crash after acceptance still favors at-most-once task startup.
+                        do {
+                            try preparation.idempotencyCache.accept(operationID: operationID)
+                            return true
+                        } catch {
+                            workspaceCreateIdempotencyLogger.error(
+                                "Task reservation failed: \(String(describing: error), privacy: .private)"
+                            )
+                            reservationFailure = .err(
+                                code: "persistence_failed",
+                                message: "Workspace task could not be reserved safely",
+                                data: nil
+                            )
+                            return false
+                        }
+                    }
                 ) else { return }
                 ws.taskCreateOperationID = operationID
                 if execution.titleSource == .auto, execution.title != nil {
@@ -142,7 +145,11 @@ extension TerminalController {
             }
 
             guard let newWorkspace else {
-                return .err(code: "internal_error", message: "Failed to create workspace", data: nil)
+                return reservationFailure ?? .err(
+                    code: "internal_error",
+                    message: "Failed to create workspace",
+                    data: nil
+                )
             }
             if let operationID {
                 preparation.idempotencyCache.associate(operationID: operationID, workspaceID: newWorkspace.id)

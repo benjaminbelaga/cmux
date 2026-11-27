@@ -8617,10 +8617,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         let context = preferredTabManager.flatMap { mainWindowContext(for: $0) }
             ?? preferredMainWindowContextForWorkspaceCreation(event: event, debugSource: debugSource)
         let manager = context?.tabManager ?? preferredTabManager
-        if !staysLocal, let manager, let machine = manager.selectedWorkspace?.deviceMachineForNewWorkspace {
+        let followsSelection = !staysLocal && manager?.namedNeutralWorkspaces != true
+        if followsSelection, let manager, let machine = manager.selectedWorkspace?.deviceMachineForNewWorkspace {
             return deviceWorkspaceCreationCoordinator?.start(on: machine, in: manager) ?? false
         }
-        if !staysLocal, let manager,
+        if followsSelection, let manager,
            let vmID = manager.selectedWorkspace?.cloudVMID,
            !vmID.isEmpty {
             // Once this intent targets a VM, an unavailable or pending cloud
@@ -9013,7 +9014,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         // target: `createWorkspaceInGroup` takes a group placement instead and
         // would drop the override, filing a sidebar empty-area double-click
         // into the selected workspace's group rather than after the last row.
-        let workspaceGroupTarget = placementOverride == nil
+        let usesNeutralWorkspace = initialSurface == .terminal
+            && context?.tabManager.namedNeutralWorkspaces == true
+        let workspaceGroupTarget = placementOverride == nil && !usesNeutralWorkspace
             ? context.flatMap { workspaceGroupNewWorkspaceTarget(in: $0) }
             : nil
 
@@ -9037,6 +9040,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         // Cmd+N/File menu behavior on ordinary local windows.
         if initialSurface == .terminal,
            !forceLocal,
+           !usesNeutralWorkspace,
            let context,
            !hasCustomConfiguredNewWorkspaceAction,
            remoteTmuxController.handleNewWorkspaceRequested(in: context.tabManager) {
@@ -18338,6 +18342,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         case .builtIn(let builtIn):
             switch builtIn {
             case .newWorkspace:
+                if context.tabManager.namedNeutralWorkspaces {
+                    guard context.tabManager.addWorkspaceIfActive() != nil else { return false }
+                    onExecuted?()
+                    return true
+                }
                 if let vmID = context.tabManager.selectedWorkspace?.cloudVMID, !vmID.isEmpty {
                     let didStart = performNewCloudWorkspaceOnCurrentMachineAction(
                         tabManager: context.tabManager, vmID: vmID, destination: destination

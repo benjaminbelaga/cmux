@@ -73,6 +73,13 @@ public struct AppCatalogSection: SettingCatalogSection {
         userDefaultsKey: "defaultWorkspacePath"
     )
 
+    /// Create new unassigned terminal workspaces in private folders under ~/sessions.
+    public let namedNeutralWorkspaces = DefaultsKey<Bool>(
+        id: "app.namedNeutralWorkspaces",
+        defaultValue: false,
+        userDefaultsKey: "namedNeutralWorkspaces"
+    )
+
     public let workspaceInheritWorkingDirectory = DefaultsKey<Bool>(
         id: "app.workspaceInheritWorkingDirectory",
         defaultValue: true,

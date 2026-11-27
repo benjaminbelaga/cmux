@@ -179,6 +179,11 @@ enum AppSettingsFileMapping {
 
     static let booleanSettings: [SettingsFileBooleanMapping] = [
         .init(
+            jsonKey: "namedNeutralWorkspaces",
+            defaultsKey: app.namedNeutralWorkspaces.userDefaultsKey,
+            invalidPath: "app.namedNeutralWorkspaces"
+        ),
+        .init(
             jsonKey: "workspaceInheritWorkingDirectory",
             defaultsKey: app.workspaceInheritWorkingDirectory.userDefaultsKey,
             invalidPath: "app.workspaceInheritWorkingDirectory"

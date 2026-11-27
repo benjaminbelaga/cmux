@@ -890,10 +890,24 @@ class TabManager: ObservableObject {
     func gitProbeDirectory(for workspace: Workspace, panelId: UUID) -> String? {
         // Cloud cwd belongs to another machine and is never a local git/gh probe target.
         if workspace.cloudDirectoryProvenanceRequired(panelId: panelId) { return nil }
-        if let directory = workspace.reportedPanelDirectory(panelId: panelId) { return normalizedWorkingDirectory(directory) }
-        guard workspace.allowsLocalDirectoryFallback(panelId: panelId) else { return nil }
-        let rawDirectory = workspace.terminalPanel(for: panelId)?.requestedWorkingDirectory ?? (!workspace.usesRemoteDirectoryProvenance && workspace.focusedPanelId == panelId ? workspace.currentDirectory : nil)
-        return rawDirectory.flatMap(normalizedWorkingDirectory)
+        let rawDirectory: String?
+        if let directory = workspace.reportedPanelDirectory(panelId: panelId) {
+            rawDirectory = directory
+        } else {
+            guard workspace.allowsLocalDirectoryFallback(panelId: panelId) else { return nil }
+            rawDirectory = workspace.terminalPanel(for: panelId)?.requestedWorkingDirectory
+                ?? (!workspace.usesRemoteDirectoryProvenance && workspace.focusedPanelId == panelId
+                    ? workspace.currentDirectory : nil)
+        }
+        guard let directory = rawDirectory.flatMap(normalizedWorkingDirectory) else { return nil }
+        if namedNeutralWorkspaces {
+            let root = WorkspaceCreationWorkingDirectoryPolicy.neutralRoot(
+                under: FileManager.default.homeDirectoryForCurrentUser
+            ).path
+            let path = URL(fileURLWithPath: directory).standardizedFileURL.path
+            if path == root || path.hasPrefix(root + "/") { return nil }
+        }
+        return directory
     }
 
     func scheduleInitialWorkspaceGitMetadataRefreshIfPossible(
@@ -1399,12 +1413,21 @@ class TabManager: ObservableObject {
             !isFinalizedForWindowClose,
             "Initial workspace creation requires an active window manager"
         )
-        guard addWorkspaceIfActive(
+        if addWorkspaceIfActive(
             title: title,
             titleSource: titleSource,
             workingDirectory: workingDirectory,
             initialTerminalInput: initialTerminalInput,
             autoWelcomeIfNeeded: autoWelcomeIfNeeded
+        ) != nil {
+            return
+        }
+        // A filesystem failure must not prevent the window manager from initializing.
+        guard namedNeutralWorkspaces, addWorkspaceIfActive(
+            title: title,
+            titleSource: titleSource,
+            workingDirectory: FileManager.default.temporaryDirectory.path,
+            autoWelcomeIfNeeded: false
         ) != nil else {
             preconditionFailure("Initial workspace creation failed for an active window manager")
         }
@@ -1435,7 +1458,8 @@ class TabManager: ObservableObject {
         autoRefreshMetadata: Bool = true,
         normalizeWorkspaceGroupsAfterInsert: Bool = true,
         applyCreationTitleAsCustomTitle: Bool = true,
-        allowTextBoxFocusDefault: Bool = true
+        allowTextBoxFocusDefault: Bool = true,
+        reserveTaskBeforeStartup: (() -> Bool)? = nil
     ) -> Workspace? {
         guard !isFinalizedForWindowClose else { return nil }
         let sourceWorkspace = selectedWorkspace
@@ -1448,7 +1472,11 @@ class TabManager: ObservableObject {
         // entire creation path. Release ARC can otherwise drop retains early across the
         // helper/insertion chain, which reintroduces use-after-free crashes in optimized builds.
         return withExtendedLifetime((capturedTabs, sourceWorkspace)) {
-            let inheritanceEnabled = inheritWorkingDirectory
+            let explicitWorkingDirectory = normalizedWorkingDirectory(overrideWorkingDirectory)
+            let usesNeutralDirectory = namedNeutralWorkspaces
+                && explicitWorkingDirectory == nil && initialSurface == .terminal
+                && !initialTerminalIsRemote && initialTerminalStartupRestoreAgent == nil
+            let inheritanceEnabled = inheritWorkingDirectory && !usesNeutralDirectory
                 && settings.value(for: settingsCatalog.app.workspaceInheritWorkingDirectory)
                 && ghosttyWorkingDirectoryInheritance().window
             let inheritedWorkingDirectory = inheritanceEnabled
@@ -1469,13 +1497,33 @@ class TabManager: ObservableObject {
 #endif
             let nextTabCount = snapshot.tabs.count + 1
             sentryBreadcrumb("workspace.create", data: ["tabCount": nextTabCount])
-            let explicitWorkingDirectory = normalizedWorkingDirectory(overrideWorkingDirectory)
+            let workspaceID = usesNeutralDirectory ? (id ?? UUID()) : id
+            var neutralDirectory: URL?
+            if let workspaceID, usesNeutralDirectory {
+                do {
+                    neutralDirectory = try WorkspaceCreationWorkingDirectoryPolicy.createNeutralDirectory(
+                        under: FileManager.default.homeDirectoryForCurrentUser,
+                        workspaceID: workspaceID,
+                        title: title
+                    )
+                } catch {
+                    NSLog("Could not create a private neutral workspace directory: %@", error.localizedDescription)
+                    if select { NSSound.beep() }
+                    return nil
+                }
+            }
+            if let reserveTaskBeforeStartup, !reserveTaskBeforeStartup() {
+                if let neutralDirectory {
+                    _ = rmdir(neutralDirectory.path)
+                }
+                return nil
+            }
             let workingDirectory = WorkspaceCreationWorkingDirectoryPolicy(
                 inheritanceEnabled: inheritanceEnabled
             ).resolve(
                 explicitWorkingDirectory: explicitWorkingDirectory,
                 inheritedWorkingDirectory: snapshot.preferredWorkingDirectory,
-                defaultWorkingDirectory: defaultWorkspaceWorkingDirectoryProvider()
+                defaultWorkingDirectory: neutralDirectory?.path ?? defaultWorkspaceWorkingDirectoryProvider()
             )
             let inheritedConfig = workspaceCreationConfigTemplate(
                 inheritedTerminalFontSizeLineage: snapshot.inheritedTerminalFontSizeLineage
@@ -1486,6 +1534,16 @@ class TabManager: ObservableObject {
             let insertIndex = newTabInsertIndex(snapshot: snapshot, placementOverride: placementOverride)
             var welcomeDelivery: WelcomeBannerDelivery?
             var resolvedInitialTerminalEnvironment = initialTerminalEnvironment
+            var resolvedWorkspaceEnvironment = workspaceEnvironment
+            if let neutralDirectory {
+                let root = neutralDirectory.deletingLastPathComponent().path
+                let key = "GIT_CEILING_DIRECTORIES"
+                let existing = workspaceEnvironment[key] ?? ProcessInfo.processInfo.environment[key]
+                resolvedWorkspaceEnvironment[key] = existing.flatMap { $0.isEmpty ? nil : "\(root):\($0)" } ?? root
+                if let surfaceCeiling = initialTerminalEnvironment[key] {
+                    resolvedInitialTerminalEnvironment[key] = surfaceCeiling.isEmpty ? root : "\(root):\(surfaceCeiling)"
+                }
+            }
             // An explicit command runs via `shell -lc`, which never loads cmux's
             // interactive shell integration, so it could not print the banner.
             let hasInitialTerminalCommand = !(initialTerminalCommand?
@@ -1507,7 +1565,7 @@ class TabManager: ObservableObject {
             let defaultTitle: String
             switch initialSurface {
             case .terminal:
-                defaultTitle = "Terminal \(nextTabCount)"
+                defaultTitle = neutralDirectory?.lastPathComponent ?? "Terminal \(nextTabCount)"
             case .browser:
                 // Match the browser surface's blank new-tab title; the
                 // single-panel title sync keeps the workspace title following
@@ -1517,7 +1575,7 @@ class TabManager: ObservableObject {
                 defaultTitle = String(localized: "workspace.cloudVM.defaultTitle", defaultValue: "Cloud VM")
             }
             let newWorkspace = makeWorkspaceForCreation(
-                id: id,
+                id: workspaceID,
                 title: title ?? defaultTitle,
                 workingDirectory: workingDirectory,
                 portOrdinal: ordinal,
@@ -1532,7 +1590,7 @@ class TabManager: ObservableObject {
                 initialBrowserURL: initialBrowserURL,
                 initialBrowserOmnibarVisible: initialBrowserOmnibarVisible,
                 initialBrowserTransparentBackground: initialBrowserTransparentBackground,
-                workspaceEnvironment: workspaceEnvironment,
+                workspaceEnvironment: resolvedWorkspaceEnvironment,
                 allowTextBoxFocusDefault: select && allowTextBoxFocusDefault
             )
             applyCreationChromeInheritance(
@@ -2039,8 +2097,12 @@ class TabManager: ObservableObject {
         defaultWorkspaceWorkingDirectoryProvider()
     }
 
+    var namedNeutralWorkspaces: Bool {
+        settings.value(for: settingsCatalog.app.namedNeutralWorkspaces)
+    }
+
     func implicitWorkingDirectoryForNewWorkspace(from sourceWorkspace: Workspace?) -> String? {
-        guard settings.value(for: settingsCatalog.app.workspaceInheritWorkingDirectory),
+        guard !namedNeutralWorkspaces, settings.value(for: settingsCatalog.app.workspaceInheritWorkingDirectory),
               ghosttyWorkingDirectoryInheritance().window else {
             return nil
         }
@@ -2347,7 +2409,11 @@ class TabManager: ObservableObject {
         applyCreationTitleAsCustomTitle: Bool = true,
         inheritWorkingDirectory: Bool? = nil
     ) -> Workspace? {
-        workspaceGrouping.createWorkspaceInGroup(
+        let allowAnchorDirectory = !namedNeutralWorkspaces
+            && settings.value(for: settingsCatalog.app.workspaceInheritWorkingDirectory)
+            && ghosttyWorkingDirectoryInheritance().window
+        let inheritDirectory = allowAnchorDirectory ? inheritWorkingDirectory : false
+        return workspaceGrouping.createWorkspaceInGroup(
             groupId: groupId,
             placement: explicitPlacement,
             referenceWorkspaceId: referenceWorkspaceId,
@@ -2358,7 +2424,7 @@ class TabManager: ObservableObject {
             initialBrowserOmnibarVisible: initialBrowserOmnibarVisible,
             initialBrowserTransparentBackground: initialBrowserTransparentBackground,
             applyCreationTitleAsCustomTitle: applyCreationTitleAsCustomTitle,
-            inheritWorkingDirectory: inheritWorkingDirectory
+            inheritWorkingDirectory: inheritDirectory
         )
     }
 
